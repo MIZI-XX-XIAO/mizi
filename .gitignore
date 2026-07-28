@@ -1,0 +1,43 @@
+# 本文件定义不应提交到Git的生成数据、分析结果、缓存和本地开发环境文件。
+# 生产数据、图片和分析输出
+data/
+test_output/
+analysis_results/
+analysis_tasks/
+*.csv
+*.tsv
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tif
+*.tiff
+
+# 二进制发布物、离线依赖和构建缓存
+wheels/
+dist/
+build/
+.offline_build/
+*.whl
+*.exe
+*.zip
+*.7z
+*.tar
+*.gz
+
+# Python和测试缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 本地环境、编辑器配置、日志和凭据
+.venv/
+venv/
+.idea/
+.vscode/
+.env
+.env.*
+*.log
+*.tmp

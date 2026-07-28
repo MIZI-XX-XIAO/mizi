@@ -1,0 +1,39 @@
+# 本文件在GitHub仓库中使用Windows和Python 3.12验证无真实数据的源码部署。
+name: Windows Python 3.12
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -X utf8 -m pip install -r requirements-dev.txt
+
+      - name: Run source tests without production data
+        run: python -X utf8 -m pytest -p no:cacheprovider -q

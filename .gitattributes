@@ -1,0 +1,10 @@
+# 本文件统一公开仓库中的文本换行格式，保证Python/YAML与Windows批处理脚本跨环境稳定。
+* text=auto
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.qss text eol=lf
+*.txt text eol=lf
+*.spec text eol=lf
+*.bat text eol=crlf
