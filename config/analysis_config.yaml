@@ -1,0 +1,25 @@
+# 本文件集中配置缺陷轮廓提取、空间聚类、周期发现和预警算法的全部关键参数。
+diff_threshold: 20
+red_min: 150
+red_dominance: 40
+morph_kernel_size: 3
+min_component_area: 8
+max_component_area: 5000
+tile_width: 2048
+tile_height: 1024
+tile_overlap: 64
+
+spatial_cluster_radius_norm: 0.03
+minimum_repeat_occurrences: 4
+minimum_period: 2
+maximum_period: 200
+period_order_tolerance: 0
+minimum_period_precision: 0.75
+minimum_period_coverage: 0.65
+burst_minimum_length: 4
+missing_order_tolerance: 0
+warning_lead_products: 3
+
+evaluation_center_tolerance_px: 10.0
+output_directory: "analysis_results"
+preview_count: 8

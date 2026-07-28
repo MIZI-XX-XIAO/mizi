@@ -1,0 +1,4 @@
+# 本文件在生产运行依赖基础上增加源码测试所需的开发依赖。
+-r requirements.txt
+pytest==8.3.5
+pytest-qt==4.5.0

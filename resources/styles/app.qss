@@ -1,0 +1,24 @@
+/* 本文件定义MEA缺陷规律分析Qt界面的基础配色、间距和告警视觉风格。 */
+QWidget { font-size: 11pt; color: #1f2933; }
+QMainWindow { background: #f5f7fa; }
+QTabWidget::pane { border: 1px solid #c9d2dc; background: white; }
+QTabBar::tab { padding: 9px 15px; min-width: 90px; }
+QTabBar::tab:selected { color: #0b5cab; border-bottom: 3px solid #0b5cab; }
+QPushButton { padding: 7px 14px; min-height: 24px; }
+QPushButton#primaryButton { background: #0b5cab; color: white; border: 0; border-radius: 4px; }
+QPushButton#primaryButton:hover { background: #084b8a; }
+QPushButton:disabled { color: #8c8c8c; }
+QLineEdit, QSpinBox, QDoubleSpinBox { padding: 5px; }
+QProgressBar { min-height: 22px; text-align: center; }
+QProgressBar::chunk { background: #2878c8; }
+QTableView { gridline-color: #d9dfe6; alternate-background-color: #f4f8fc; }
+QGroupBox { font-weight: 600; border: 1px solid #d7dee7; border-radius: 5px; margin-top: 12px; padding: 12px; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+QLabel#pageTitle { font-size: 18pt; font-weight: 700; color: #14324a; }
+QLabel#stageLabel { font-size: 15pt; font-weight: 600; color: #0b5cab; }
+QLabel#kpiValue { font-size: 20pt; font-weight: 700; color: #0b5cab; }
+QLabel#viewTitle, QLabel#sectionTitle { font-weight: 700; color: #14324a; }
+QFrame#kpiCard { background: white; border: 1px solid #d7dee7; border-radius: 6px; }
+QLabel#warningBanner { background: #fff4ce; border: 1px solid #e2b93b; border-radius: 4px; padding: 8px; }
+QLabel#successBanner { background: #e7f6ec; border: 1px solid #53a66f; border-radius: 4px; padding: 8px; }
+QLabel#errorBanner { background: #fde8e8; border: 1px solid #d96c6c; border-radius: 4px; padding: 8px; }

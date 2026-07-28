@@ -1,0 +1,13 @@
+﻿# 本文件锁定家庭电脑验证过的GUI直接依赖版本，供公司电脑离线复现。
+numpy==1.26.4
+opencv-python==4.10.0.84
+pandas==2.2.2
+matplotlib==3.9.2
+PyYAML==6.0.2
+pytest==8.3.5
+psutil==6.0.0
+PySide6==6.11.1
+PySide6_Addons==6.11.1
+PySide6_Essentials==6.11.1
+shiboken6==6.11.1
+pytest-qt==4.5.0
