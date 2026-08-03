@@ -8,10 +8,11 @@ from openpyxl import Workbook
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
+from PySide6.QtCore import QSize  # noqa: E402
 from PySide6.QtWidgets import QLabel  # noqa: E402
 
 from gui.main_window import MainWindow  # noqa: E402
-from gui.workbench import WorkbenchStack  # noqa: E402
+from gui.workbench import LayoutProfile, WorkbenchStack, resolve_layout_profile  # noqa: E402
 
 
 def test_main_window_starts(qtbot) -> None:
@@ -41,13 +42,50 @@ def test_workbench_navigation_and_responsive_layout(qtbot) -> None:
     assert window.tabs.currentIndex() == 5
     assert window.workbench.header.title.text() == "关联分析"
 
-    window.workbench.apply_responsive_layout(1366)
+    window.workbench.apply_responsive_layout(QSize(1366, 768))
+    assert window.workbench.profile is LayoutProfile.COMPACT
     assert window.workbench.navigation.width() == 76
     assert not window.workbench.assistant.isVisible()
 
-    window.workbench.apply_responsive_layout(1920)
+    qtbot.wait(10)
+    content_width = window.workbench.content.width()
+    window.workbench.set_assistant_visible(True)
+    qtbot.wait(10)
+    assert window.workbench._assistant_overlay
+    assert window.workbench.content.width() == content_width
+    assert 320 <= window.workbench.assistant.width() <= 400
+
+    window.workbench.apply_responsive_layout(QSize(1920, 1200))
+    assert window.workbench.profile is LayoutProfile.FULL
     assert window.workbench.navigation.width() == 214
     assert window.workbench.assistant.isVisible()
+    window.close()
+    window.deleteLater()
+
+
+def test_layout_profiles_cover_windows_scaling_targets() -> None:
+    assert resolve_layout_profile(QSize(1920, 1200)) is LayoutProfile.FULL
+    assert resolve_layout_profile(QSize(1536, 960)) is LayoutProfile.FULL
+    assert resolve_layout_profile(QSize(1280, 800)) is LayoutProfile.COMPACT
+    assert resolve_layout_profile(QSize(1366, 768)) is LayoutProfile.COMPACT
+    assert resolve_layout_profile(QSize(980, 620)) is LayoutProfile.TIGHT
+
+
+def test_compact_excel_page_does_not_set_oversized_window_hint(qtbot) -> None:
+    window = MainWindow(Path(__file__).resolve().parents[1])
+    qtbot.addWidget(window)
+    window.resize(1280, 800)
+    window.show()
+    window.tabs.setCurrentIndex(4)
+    window.workbench.apply_responsive_layout(QSize(1280, 800), force=True)
+    qtbot.wait(10)
+
+    assert window.minimumSizeHint().height() < 800
+    assert window.workbench.content.width() >= 1100
+    assert window.excel_page.result_tabs.usesScrollButtons()
+    assert window.excel_page.config_scroll.horizontalScrollBar().maximum() == 0
+    assert not window.workbench.header.subtitle.isVisible()
+    assert not window.workbench.header.task_context.isVisible()
     window.close()
     window.deleteLater()
 

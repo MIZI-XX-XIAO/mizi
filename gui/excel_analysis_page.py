@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -36,6 +37,7 @@ from src.excel_analysis import (
 )
 from .dataframe_table import DataFrameTableWidget
 from .excel_analysis_worker import ExcelAnalysisWorker
+from .workbench import LayoutProfile
 
 
 class ExcelAnalysisPage(QWidget):
@@ -54,11 +56,11 @@ class ExcelAnalysisPage(QWidget):
 
         title = QLabel("Excel质量数据分析")
         title.setObjectName("pageTitle")
-        intro = QLabel(
+        self.intro = QLabel(
             "读取Data工作表，自动识别产品字段、Result参数及其Tolerance；"
             "原始State和系统重算结果会并列保留。"
         )
-        intro.setWordWrap(True)
+        self.intro.setWordWrap(True)
 
         source_group = QGroupBox("工作簿与任务")
         source_form = QFormLayout(source_group)
@@ -107,8 +109,9 @@ class ExcelAnalysisPage(QWidget):
         source_form.addRow("任务名称", self.task_name)
 
         mapping_group = QGroupBox("核心字段映射（自动识别后可调整）")
-        mapping_layout = QGridLayout(mapping_group)
+        self.mapping_layout = QGridLayout(mapping_group)
         self.mapping_combos: dict[str, QComboBox] = {}
+        self.mapping_widgets: list[tuple[QLabel, QComboBox]] = []
         labels = {
             "dmc_raw": "Ident No.", "state": "State", "test_date": "Test Date",
             "result_timestamp": "Result.TimeStamping", "variant": "Variant", "batch": "Batch",
@@ -117,8 +120,10 @@ class ExcelAnalysisPage(QWidget):
         for index, (canonical, caption) in enumerate(labels.items()):
             combo = QComboBox(); combo.addItem("自动/未映射", "")
             self.mapping_combos[canonical] = combo
-            mapping_layout.addWidget(QLabel(caption), index // 4 * 2, index % 4)
-            mapping_layout.addWidget(combo, index // 4 * 2 + 1, index % 4)
+            caption_label = QLabel(caption)
+            self.mapping_widgets.append((caption_label, combo))
+            self.mapping_layout.addWidget(caption_label, index // 4 * 2, index % 4)
+            self.mapping_layout.addWidget(combo, index // 4 * 2 + 1, index % 4)
 
         actions = QHBoxLayout()
         self.start_button = QPushButton("开始Excel分析")
@@ -133,7 +138,8 @@ class ExcelAnalysisPage(QWidget):
         self.stage.setObjectName("stageLabel")
 
         self.kpi_labels: dict[str, QLabel] = {}
-        kpi_grid = QGridLayout()
+        self.kpi_grid = QGridLayout()
+        self.kpi_cards: list[QFrame] = []
         kpis = (
             ("record_count", "记录数"), ("parameter_count", "参数数"),
             ("state_nok_count", "原始NOK"), ("state_nok_rate", "原始NOK率"),
@@ -147,7 +153,8 @@ class ExcelAnalysisPage(QWidget):
             label = QLabel(caption); label.setAlignment(Qt.AlignCenter)
             card_layout.addWidget(value); card_layout.addWidget(label)
             self.kpi_labels[key] = value
-            kpi_grid.addWidget(card, index // 4, index % 4)
+            self.kpi_cards.append(card)
+            self.kpi_grid.addWidget(card, index // 4, index % 4)
 
         self.summary = QLabel("尚未执行Excel分析。")
         self.summary.setObjectName("warningBanner")
@@ -163,35 +170,99 @@ class ExcelAnalysisPage(QWidget):
             "preview": DataFrameTableWidget("excel_preview"),
         }
         chart_page = QWidget()
-        chart_layout = QVBoxLayout(chart_page)
+        self.chart_layout = QVBoxLayout(chart_page)
         self.trend_chart = QLabel("分析完成后显示质量趋势图")
         self.violation_chart = QLabel("分析完成后显示参数超差排名")
         for chart in (self.trend_chart, self.violation_chart):
             chart.setAlignment(Qt.AlignCenter); chart.setMinimumHeight(220)
             chart.setObjectName("excelChart")
-            chart_layout.addWidget(chart)
-        result_tabs = QTabWidget()
-        result_tabs.addTab(self.tables["preview"], "导入预览")
-        result_tabs.addTab(chart_page, "质量图表")
+            self.chart_layout.addWidget(chart)
+        self.result_tabs = QTabWidget()
+        self.result_tabs.setUsesScrollButtons(True)
+        self.result_tabs.setElideMode(Qt.ElideRight)
+        self.result_tabs.addTab(self.tables["preview"], "导入预览")
+        self.result_tabs.addTab(chart_page, "质量图表")
         for key, caption in (
             ("parameter_stats", "参数统计"), ("violations", "超差明细"),
             ("conflicts", "判定冲突"), ("group_stats", "分组对比"),
             ("trend", "质量趋势"), ("quality", "数据质量"), ("standardized", "标准化数据"),
         ):
-            result_tabs.addTab(self.tables[key], caption)
+            self.result_tabs.addTab(self.tables[key], caption)
 
         configuration = QWidget()
         configuration_layout = QVBoxLayout(configuration)
         configuration_layout.setContentsMargins(0, 0, 0, 0)
         configuration_layout.addWidget(source_group)
         configuration_layout.addWidget(mapping_group)
-        config_scroll = QScrollArea(); config_scroll.setWidgetResizable(True); config_scroll.setWidget(configuration)
-        config_scroll.setMinimumHeight(250); config_scroll.setMaximumHeight(340)
+        self.config_scroll = QScrollArea()
+        self.config_scroll.setWidgetResizable(True)
+        self.config_scroll.setWidget(configuration)
+        self.config_scroll.setMinimumHeight(180)
+        self.config_toggle = QPushButton("收起工作簿配置  ▴")
+        self.config_toggle.setObjectName("advancedToggle")
+        self.config_toggle.setCheckable(True)
+        self.config_toggle.setChecked(True)
+        self.config_toggle.toggled.connect(self.set_config_expanded)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(title); layout.addWidget(intro); layout.addWidget(config_scroll, 0)
-        layout.addWidget(self.stage); layout.addWidget(self.progress); layout.addLayout(actions)
-        layout.addLayout(kpi_grid); layout.addWidget(self.summary); layout.addWidget(result_tabs, 1)
+        results = QWidget()
+        results_layout = QVBoxLayout(results)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.addWidget(self.stage)
+        results_layout.addWidget(self.progress)
+        results_layout.addLayout(actions)
+        results_layout.addLayout(self.kpi_grid)
+        results_layout.addWidget(self.summary)
+        results_layout.addWidget(self.result_tabs, 1)
+
+        self.vertical_splitter = QSplitter(Qt.Vertical)
+        self.vertical_splitter.setChildrenCollapsible(True)
+        self.vertical_splitter.addWidget(self.config_scroll)
+        self.vertical_splitter.addWidget(results)
+        self.vertical_splitter.setStretchFactor(0, 0)
+        self.vertical_splitter.setStretchFactor(1, 1)
+        self.vertical_splitter.setSizes([260, 520])
+
+        self.page_layout = QVBoxLayout(self)
+        self.page_layout.addWidget(title)
+        self.page_layout.addWidget(self.intro)
+        self.page_layout.addWidget(self.config_toggle)
+        self.page_layout.addWidget(self.vertical_splitter, 1)
+
+    def set_config_expanded(self, expanded: bool) -> None:
+        self.config_scroll.setVisible(expanded)
+        self.config_toggle.blockSignals(True)
+        self.config_toggle.setChecked(expanded)
+        self.config_toggle.setText("收起工作簿配置  ▴" if expanded else "展开工作簿配置  ▾")
+        self.config_toggle.blockSignals(False)
+        if expanded:
+            self.vertical_splitter.setSizes([240, max(320, self.height() - 340)])
+
+    def set_layout_profile(self, profile: LayoutProfile) -> None:
+        compact = profile is not LayoutProfile.FULL
+        tight = profile is LayoutProfile.TIGHT
+        columns = 4 if tight else 8 if compact else 4
+        for card in self.kpi_cards:
+            self.kpi_grid.removeWidget(card)
+        for index, card in enumerate(self.kpi_cards):
+            self.kpi_grid.addWidget(card, index // columns, index % columns)
+        mapping_columns = 2 if compact else 4
+        for label, combo in self.mapping_widgets:
+            self.mapping_layout.removeWidget(label)
+            self.mapping_layout.removeWidget(combo)
+        for index, (label, combo) in enumerate(self.mapping_widgets):
+            row = index // mapping_columns * 2
+            column = index % mapping_columns
+            self.mapping_layout.addWidget(label, row, column)
+            self.mapping_layout.addWidget(combo, row + 1, column)
+        self.chart_layout.setDirection(
+            QVBoxLayout.LeftToRight if compact else QVBoxLayout.TopToBottom
+        )
+        for chart in (self.trend_chart, self.violation_chart):
+            chart.setMinimumHeight(140 if tight else 160 if compact else 220)
+        self.intro.setVisible(not tight)
+        margins = 4 if tight else 7 if compact else 9
+        self.page_layout.setContentsMargins(margins, margins, margins, margins)
+        self.config_scroll.setMinimumHeight(100 if compact else 180)
 
     def _choose_workbook(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -277,6 +348,7 @@ class ExcelAnalysisPage(QWidget):
         self.settings.setValue("excel/task_name", self.task_name.text())
         self.settings.setValue("excel/column_mapping", json.dumps(self._mapping(), ensure_ascii=False))
         self.progress.setValue(0); self.start_button.setEnabled(False); self.cancel_button.setEnabled(True)
+        self.set_config_expanded(False)
         self.thread = QThread(self); self.worker = ExcelAnalysisWorker(request); self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress_changed.connect(self._progress)

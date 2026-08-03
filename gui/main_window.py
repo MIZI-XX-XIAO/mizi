@@ -30,7 +30,7 @@ from .image_viewer import ImageReviewWidget
 from .analysis_worker import AnalysisWorker
 from .dataframe_table import DataFrameTableWidget
 from .parameter_dialog import ParameterDialog
-from .workbench import WorkbenchShell, WorkbenchStack
+from .workbench import ElidedLabel, LayoutProfile, WorkbenchShell, WorkbenchStack
 from .excel_analysis_page import ExcelAnalysisPage
 from src.excel_analysis import ExcelAnalysisResult, excel_relationship_frame, load_excel_workbook
 
@@ -56,6 +56,8 @@ class MainWindow(QMainWindow):
         self.loaded_products = pd.DataFrame()
         self._close_after_cancel = False
         self._analysis_started = 0.0
+        self._restore_maximized = False
+        self._initial_show = True
         self.tabs = WorkbenchStack()
         self._build_setup_tab()
         self._build_quality_tab()
@@ -92,8 +94,8 @@ class MainWindow(QMainWindow):
             return
         area = screen.availableGeometry()
         self.resize(
-            min(1500, max(980, int(area.width() * 0.92))),
-            min(900, max(620, int(area.height() * 0.90))),
+            min(area.width(), max(980, int(area.width() * 0.92))),
+            min(area.height(), max(620, int(area.height() * 0.90))),
         )
 
     def _saved_path(self, key: str, default: Path | str, directory: bool = False) -> str:
@@ -214,6 +216,8 @@ class MainWindow(QMainWindow):
         self.stage_label.setObjectName("stageLabel")
         self.stage_steps = QLabel("检查输入  ›  提取缺陷  ›  发现规律  ›  写入结果  ›  生成图表")
         self.stage_steps.setObjectName("stageStepper")
+        self.stage_steps.setWordWrap(True)
+        self.stage_steps.setMinimumWidth(0)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress_detail = QLabel("0/0")
@@ -322,7 +326,7 @@ class MainWindow(QMainWindow):
         warning = QLabel("统计关联不等于因果关系；结论需结合工艺机理和受控实验验证。")
         warning.setObjectName("warningBanner")
         warning.setWordWrap(True)
-        controls = QHBoxLayout()
+        controls = QGridLayout()
         self.process_edit, process_row = self._path_row(
             self._saved_path("paths/process", ""), True,
             "工艺参数 (*.csv *.xlsx *.xlsm);;CSV (*.csv);;Excel (*.xlsx *.xlsm)"
@@ -337,11 +341,12 @@ class MainWindow(QMainWindow):
         analyze.clicked.connect(self._analyze_process_parameters)
         self.use_current_excel = QCheckBox("使用当前Excel分析结果")
         self.use_current_excel.setEnabled(False)
-        controls.addWidget(process_row, 1)
-        controls.addWidget(self.use_current_excel)
-        controls.addWidget(QLabel("时间匹配容差"))
-        controls.addWidget(self.time_tolerance)
-        controls.addWidget(analyze)
+        controls.addWidget(process_row, 0, 0, 1, 5)
+        controls.addWidget(self.use_current_excel, 1, 0)
+        controls.addWidget(QLabel("时间匹配容差"), 1, 1)
+        controls.addWidget(self.time_tolerance, 1, 2)
+        controls.setColumnStretch(3, 1)
+        controls.addWidget(analyze, 1, 4)
         self.relationship_summary = QLabel("完成缺陷分析后，可加载工艺参数表进行关联分析。")
         self.relationship_summary.setWordWrap(True)
         self.relationship_metrics = DataFrameTableWidget("process_metrics")
@@ -377,28 +382,48 @@ class MainWindow(QMainWindow):
         status = QStatusBar()
         status.setObjectName("applicationStatusBar")
         status.showMessage("就绪")
-        status.addPermanentWidget(QLabel(f"版本 {APP_VERSION}"))
-        status.addPermanentWidget(QLabel(f"日志：{self.log_path}"))
+        self.version_status_label = QLabel(f"版本 {APP_VERSION}")
+        self.log_status_label = ElidedLabel(f"日志：{self.log_path}")
+        self.log_status_label.setMaximumWidth(320)
+        status.addPermanentWidget(self.version_status_label)
+        status.addPermanentWidget(self.log_status_label)
         self.setStatusBar(status)
 
     def _restore_settings(self) -> None:
         geometry = self.settings.value("window/geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
-            if QApplication.screenAt(self.frameGeometry().center()) is None:
-                self._set_adaptive_initial_size()
-                self.move(20, 20)
+            self._clamp_window_to_screen()
+        self.workbench.apply_responsive_layout(self.size(), force=True)
         saved_layout = str(self.settings.value("review/layout", "2×2"))
         index = self.review.layout_combo.findText(saved_layout)
         if index >= 0:
             self.review.layout_combo.setCurrentIndex(index)
         splitter_state = self.settings.value("window/workbench_splitter")
-        if splitter_state is not None:
+        if splitter_state is not None and self.workbench.profile is LayoutProfile.FULL:
             self.workbench.splitter.restoreState(splitter_state)
         assistant_visible = str(
             self.settings.value("window/assistant_visible", "true")
         ).lower() == "true"
-        self.workbench.set_assistant_visible(assistant_visible)
+        self.workbench.set_assistant_visible(
+            assistant_visible if self.workbench.profile is LayoutProfile.FULL else False
+        )
+        self._restore_maximized = str(
+            self.settings.value("window/maximized", "false")
+        ).lower() == "true"
+
+    def _clamp_window_to_screen(self) -> None:
+        screen = QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
+        if screen is None:
+            self._set_adaptive_initial_size()
+            return
+        area = screen.availableGeometry()
+        frame = self.frameGeometry()
+        width = min(frame.width(), area.width())
+        height = min(frame.height(), area.height())
+        x = min(max(frame.x(), area.left()), area.right() - width + 1)
+        y = min(max(frame.y(), area.top()), area.bottom() - height + 1)
+        self.setGeometry(x, y, width, height)
 
     def _choose_file(self, edit: QLineEdit, filter_text: str) -> None:
         start = str(Path(edit.text()).parent) if edit.text() else str(self.project_root)
@@ -789,6 +814,7 @@ class MainWindow(QMainWindow):
         ):
             self.settings.setValue(key, value)
         self.settings.setValue("window/geometry", self.saveGeometry())
+        self.settings.setValue("window/maximized", self.isMaximized())
         self.settings.setValue(
             "window/workbench_splitter", self.workbench.splitter.saveState()
         )
@@ -799,7 +825,18 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if hasattr(self, "workbench"):
-            self.workbench.apply_responsive_layout(event.size().width())
+            self.workbench.apply_responsive_layout(event.size())
+            if hasattr(self, "log_status_label"):
+                tight = self.workbench.profile is LayoutProfile.TIGHT
+                self.log_status_label.setVisible(not tight)
+                self.version_status_label.setVisible(not tight)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._initial_show:
+            self._initial_show = False
+            if self._restore_maximized:
+                QTimer.singleShot(0, self.showMaximized)
 
     def closeEvent(self, event) -> None:
         self._save_settings()
