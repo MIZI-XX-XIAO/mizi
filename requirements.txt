@@ -2,6 +2,7 @@
 numpy==1.26.4
 opencv-python==4.10.0.84
 pandas==2.2.2
+openpyxl==3.1.5
 matplotlib==3.9.2
 PyYAML==6.0.2
 psutil==6.0.0

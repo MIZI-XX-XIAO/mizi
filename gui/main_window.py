@@ -13,7 +13,7 @@ import psutil
 import yaml
 from PySide6.QtCore import QDateTime, QSettings, QThread, QTimer, Qt
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStatusBar,
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
@@ -30,6 +30,9 @@ from .image_viewer import ImageReviewWidget
 from .analysis_worker import AnalysisWorker
 from .dataframe_table import DataFrameTableWidget
 from .parameter_dialog import ParameterDialog
+from .workbench import WorkbenchShell, WorkbenchStack
+from .excel_analysis_page import ExcelAnalysisPage
+from src.excel_analysis import ExcelAnalysisResult, excel_relationship_frame, load_excel_workbook
 
 
 class MainWindow(QMainWindow):
@@ -48,25 +51,36 @@ class MainWindow(QMainWindow):
         self.thread: QThread | None = None
         self.worker: AnalysisWorker | None = None
         self.current_result: AnalysisResult | None = None
+        self.current_excel_result: ExcelAnalysisResult | None = None
         self._result_config: dict[str, Any] = {}
         self.loaded_products = pd.DataFrame()
         self._close_after_cancel = False
         self._analysis_started = 0.0
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.setCentralWidget(self.tabs)
+        self.tabs = WorkbenchStack()
         self._build_setup_tab()
         self._build_quality_tab()
         self._build_progress_tab()
         self._build_result_tab()
+        self._build_excel_tab()
         self._build_relationship_tab()
         self.review = ImageReviewWidget()
-        self.tabs.addTab(self.review, "⑥ 图片复核")
+        self.tabs.addTab(self.review, "⑦ 图片复核")
+        self.workbench = WorkbenchShell(self.tabs, APP_VERSION)
+        self.workbench.navigation.exit_requested.connect(self.close)
+        self.setCentralWidget(self.workbench)
+        self.task_edit.textChanged.connect(self.workbench.header.set_task_name)
+        self.workbench.header.set_task_name(self.task_edit.text())
         self._build_status_bar()
         self._restore_settings()
-        style = self.project_root / "resources/styles/app.qss"
-        if style.exists():
-            self.setStyleSheet(style.read_text(encoding="utf-8"))
+        style_files = (
+            self.project_root / "resources/styles/app.qss",
+            self.project_root / "resources/styles/workbench.qss",
+        )
+        self.setStyleSheet(
+            "\n".join(
+                path.read_text(encoding="utf-8") for path in style_files if path.exists()
+            )
+        )
         self.resource_timer = QTimer(self)
         self.resource_timer.timeout.connect(self._update_resource_status)
         self.resource_timer.start(2000)
@@ -137,6 +151,7 @@ class MainWindow(QMainWindow):
         self.task_edit = QLineEdit(str(self.settings.value("task/name", "5S分析")))
         form.addRow("任务名称", self.task_edit)
         advanced_group = QGroupBox("高级设置")
+        advanced_group.setObjectName("advancedSettings")
         form = QFormLayout(advanced_group)
         self.config_edit, row = self._path_row(
             self._saved_path(
@@ -147,6 +162,16 @@ class MainWindow(QMainWindow):
         params = QPushButton("编辑分析参数…")
         params.clicked.connect(self._edit_parameters)
         form.addRow("", params)
+        advanced_toggle = QPushButton("显示高级设置  ▾")
+        advanced_toggle.setObjectName("advancedToggle")
+        advanced_toggle.setCheckable(True)
+        advanced_toggle.toggled.connect(advanced_group.setVisible)
+        advanced_toggle.toggled.connect(
+            lambda checked: advanced_toggle.setText(
+                "收起高级设置  ▴" if checked else "显示高级设置  ▾"
+            )
+        )
+        advanced_group.setVisible(False)
         buttons = QHBoxLayout()
         buttons.addStretch()
         inspect = QPushButton("1. 检查数据")
@@ -158,6 +183,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self.start_button)
         layout.addWidget(data_group)
         layout.addWidget(output_group)
+        layout.addWidget(advanced_toggle)
         layout.addWidget(advanced_group)
         layout.addStretch()
         layout.addLayout(buttons)
@@ -186,6 +212,8 @@ class MainWindow(QMainWindow):
         title.setObjectName("pageTitle")
         self.stage_label = QLabel("等待任务")
         self.stage_label.setObjectName("stageLabel")
+        self.stage_steps = QLabel("检查输入  ›  提取缺陷  ›  发现规律  ›  写入结果  ›  生成图表")
+        self.stage_steps.setObjectName("stageStepper")
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress_detail = QLabel("0/0")
@@ -201,6 +229,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.clicked.connect(self._cancel)
         layout.addWidget(title)
         layout.addWidget(self.stage_label)
+        layout.addWidget(self.stage_steps)
         layout.addWidget(self.progress)
         layout.addWidget(self.progress_detail)
         layout.addWidget(self.resource_label)
@@ -295,9 +324,10 @@ class MainWindow(QMainWindow):
         warning.setWordWrap(True)
         controls = QHBoxLayout()
         self.process_edit, process_row = self._path_row(
-            self._saved_path("paths/process", ""), True, "CSV (*.csv)"
+            self._saved_path("paths/process", ""), True,
+            "工艺参数 (*.csv *.xlsx *.xlsm);;CSV (*.csv);;Excel (*.xlsx *.xlsm)"
         )
-        self.process_edit.setPlaceholderText("包含产品标识/时间戳和数值工艺参数的CSV")
+        self.process_edit.setPlaceholderText("包含产品标识/时间戳和数值工艺参数的CSV或Excel")
         self.time_tolerance = QSpinBox()
         self.time_tolerance.setRange(0, 86400)
         self.time_tolerance.setValue(int(self.settings.value("process/tolerance_seconds", 60)))
@@ -305,7 +335,10 @@ class MainWindow(QMainWindow):
         analyze = QPushButton("分析工艺关联")
         analyze.setObjectName("primaryButton")
         analyze.clicked.connect(self._analyze_process_parameters)
+        self.use_current_excel = QCheckBox("使用当前Excel分析结果")
+        self.use_current_excel.setEnabled(False)
         controls.addWidget(process_row, 1)
+        controls.addWidget(self.use_current_excel)
         controls.addWidget(QLabel("时间匹配容差"))
         controls.addWidget(self.time_tolerance)
         controls.addWidget(analyze)
@@ -323,10 +356,26 @@ class MainWindow(QMainWindow):
         layout.addLayout(controls)
         layout.addWidget(self.relationship_summary)
         layout.addWidget(tables, 1)
-        self.tabs.addTab(page, "⑤ 关联分析")
+        self.tabs.addTab(page, "⑥ 关联分析")
+
+    def _build_excel_tab(self) -> None:
+        self.excel_page = ExcelAnalysisPage(self.project_root)
+        self.excel_page.result_ready.connect(self._excel_result_ready)
+        self.excel_page.status_message.connect(lambda message: self.statusBar().showMessage(message, 8000))
+        self.tabs.addTab(self.excel_page, "⑤ Excel分析")
+
+    def _excel_result_ready(self, result: ExcelAnalysisResult) -> None:
+        self.current_excel_result = result
+        self.use_current_excel.setEnabled(True)
+        self.use_current_excel.setChecked(True)
+        self.relationship_summary.setText(
+            f"当前Excel结果已就绪：{result.summary['record_count']}条记录、"
+            f"{result.summary['parameter_count']}个参数。可直接执行图片缺陷关联分析。"
+        )
 
     def _build_status_bar(self) -> None:
         status = QStatusBar()
+        status.setObjectName("applicationStatusBar")
         status.showMessage("就绪")
         status.addPermanentWidget(QLabel(f"版本 {APP_VERSION}"))
         status.addPermanentWidget(QLabel(f"日志：{self.log_path}"))
@@ -343,6 +392,13 @@ class MainWindow(QMainWindow):
         index = self.review.layout_combo.findText(saved_layout)
         if index >= 0:
             self.review.layout_combo.setCurrentIndex(index)
+        splitter_state = self.settings.value("window/workbench_splitter")
+        if splitter_state is not None:
+            self.workbench.splitter.restoreState(splitter_state)
+        assistant_visible = str(
+            self.settings.value("window/assistant_visible", "true")
+        ).lower() == "true"
+        self.workbench.set_assistant_visible(assistant_visible)
 
     def _choose_file(self, edit: QLineEdit, filter_text: str) -> None:
         start = str(Path(edit.text()).parent) if edit.text() else str(self.project_root)
@@ -454,6 +510,7 @@ class MainWindow(QMainWindow):
             signal.connect(self.thread.quit)
         self.thread.finished.connect(self._thread_finished)
         self.thread.start()
+        self.workbench.header.set_run_state("分析运行中", "running")
         self.tabs.setCurrentIndex(2)
 
     def _stage(self, stage: str) -> None:
@@ -515,6 +572,7 @@ class MainWindow(QMainWindow):
         self._populate_filters(result.frames["products"], result.frames["extracted"])
         self._apply_global_filters()
         self.statusBar().showMessage(f"分析完成：{result.output_dir}")
+        self.workbench.header.set_run_state("分析完成", "success")
         QMessageBox.information(self, "分析完成", f"结果目录：\n{result.output_dir}")
         self.tabs.setCurrentIndex(3)
 
@@ -622,12 +680,14 @@ class MainWindow(QMainWindow):
         self.review.set_data(products, extracted, self._result_config)
 
     def _cancelled(self, result: AnalysisResult) -> None:
+        self.workbench.header.set_run_state("任务已取消", "ready")
         QMessageBox.information(self, "任务已取消", f"部分诊断结果：\n{result.output_dir}")
         if self._close_after_cancel:
             self.close()
 
     def _failed(self, message: str) -> None:
         self.logger.error("分析失败：%s", message)
+        self.workbench.header.set_run_state("分析失败", "error")
         QMessageBox.critical(
             self, "分析失败", f"{message}\n\n诊断日志：{self.log_path}"
         )
@@ -661,13 +721,26 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "尚无缺陷结果", "请先完成一次缺陷分析。")
             return
         try:
-            path = Path(self.process_edit.text().strip())
-            if not path.is_file():
-                raise FileNotFoundError(f"工艺参数文件不存在：{path}")
+            if self.use_current_excel.isChecked():
+                if self.current_excel_result is None:
+                    raise ValueError("当前没有可用的Excel分析结果")
+                parameters = excel_relationship_frame(
+                    self.current_excel_result.workbook_data,
+                    self.current_excel_result.frames["standardized"],
+                )
+            else:
+                path = Path(self.process_edit.text().strip())
+                if not path.is_file():
+                    raise FileNotFoundError(f"工艺参数文件不存在：{path}")
+                if path.suffix.lower() in {".xlsx", ".xlsm"}:
+                    workbook_data = load_excel_workbook(path)
+                    parameters = excel_relationship_frame(workbook_data)
+                else:
+                    parameters = pd.read_csv(path)
             result = analyze_process_relationships(
                 self.current_result.frames["products"],
                 self.current_result.frames["extracted"],
-                pd.read_csv(path),
+                parameters,
                 self.time_tolerance.value(),
             )
             self.relationship_metrics.set_frame(result.parameter_metrics)
@@ -716,9 +789,26 @@ class MainWindow(QMainWindow):
         ):
             self.settings.setValue(key, value)
         self.settings.setValue("window/geometry", self.saveGeometry())
+        self.settings.setValue(
+            "window/workbench_splitter", self.workbench.splitter.saveState()
+        )
+        self.settings.setValue(
+            "window/assistant_visible", self.workbench.assistant.isVisible()
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "workbench"):
+            self.workbench.apply_responsive_layout(event.size().width())
 
     def closeEvent(self, event) -> None:
         self._save_settings()
+        if self.excel_page.thread and self.excel_page.thread.isRunning():
+            answer = QMessageBox.question(self, "Excel任务运行中", "先安全取消Excel分析再关闭？")
+            if answer == QMessageBox.Yes:
+                self.excel_page.cancel_analysis()
+            event.ignore()
+            return
         if self.thread and self.thread.isRunning():
             answer = QMessageBox.question(self, "任务运行中", "先安全取消任务再关闭？")
             if answer == QMessageBox.Yes:

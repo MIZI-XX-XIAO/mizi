@@ -12,7 +12,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DIRECT_PACKAGES = [
-    "numpy", "opencv-python", "pandas", "matplotlib", "PyYAML", "pytest", "psutil",
+    "numpy", "opencv-python", "pandas", "openpyxl", "et-xmlfile", "matplotlib", "PyYAML", "pytest", "psutil",
     "PySide6", "PySide6_Addons", "PySide6_Essentials", "shiboken6", "pytest-qt",
 ]
 

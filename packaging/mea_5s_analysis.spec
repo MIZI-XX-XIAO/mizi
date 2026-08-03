@@ -6,6 +6,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH).parent
 PANDAS_FORMAT_MODULES = collect_submodules("pandas.io.formats")
+OPENPYXL_MODULES = collect_submodules("openpyxl")
 
 a = Analysis(
     [str(ROOT / "scripts" / "start_gui.py")],
@@ -15,7 +16,7 @@ a = Analysis(
         (str(ROOT / "config"), "config"),
         (str(ROOT / "resources"), "resources"),
     ],
-    hiddenimports=PANDAS_FORMAT_MODULES,
+    hiddenimports=PANDAS_FORMAT_MODULES + OPENPYXL_MODULES,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

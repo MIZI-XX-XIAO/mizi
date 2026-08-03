@@ -5,14 +5,15 @@
 
 ## 软件界面
 
-界面采用六步工作流：
+界面采用七个工作模块：
 
 1. 新建任务：选择产品清单、图片根目录、结果目录和分析参数。
 2. 数据检查：检查字段、产品序号、空值及图片路径。
 3. 执行分析：后台提取缺陷并显示进度、资源使用、预计时间和实时告警。
 4. 结果概览：查看规律、预警、缺陷共现和序列关系，支持筛选、排序、搜索和导出。
-5. 关联分析：分析数值工艺参数与缺陷之间的相关性、效应量、区间缺陷率和模型重要性。
-6. 图片复核：查看 A图、E图、差异图和Mask，支持检测框、同步缩放拖动、缺陷导航及局部原图。
+5. Excel分析：读取测试工作簿，统计State、Tolerance超差、判定冲突、趋势和分组质量。
+6. 关联分析：分析数值工艺参数与图片缺陷之间的相关性、效应量、区间缺陷率和模型重要性。
+7. 图片复核：查看 A图、E图、差异图和Mask，支持检测框、同步缩放拖动、缺陷导航及局部原图。
 
 窗口会适配常见办公电脑分辨率和 Windows DPI 缩放，并记忆窗口、路径、表格列宽及复核布局。
 
@@ -23,6 +24,8 @@
 相对图片路径默认相对于项目目录解析，也可在界面指定图片根目录。A/E图片必须为8位、宽高一致并严格对齐；A图可为灰度图，E图为彩色图且AOI缺陷轮廓应以红色标记。
 
 工艺参数 CSV 应包含 `product_id`、`order_code`、`dmc_raw` 或 `global_order` 之一进行精确关联。没有共同产品键时，可使用 `production_timestamp` 或 `timestamp` 按界面容差就近匹配。其他数值列作为工艺参数参与分析。统计关联不代表因果关系。
+
+Excel质量分析支持`.xlsx`和`.xlsm`，默认读取`Data`和`Query parameter`工作表。程序会将`Ident No.`标准化为`dmc_raw`，按列位置配对`Result.*`与其后的重复`Tolerance`列，并分别保留原始`State`和系统容差判定。两种判定不一致的记录会进入冲突表，不会覆盖原始结果。Excel可独立分析；完成图片分析后，也可按产品码或时间执行联合分析。
 
 ## 从GitHub部署到公司电脑
 
@@ -81,6 +84,13 @@ $env:MEA5S_REAL_DATA_ROOT="D:\本地数据\dataset_realistic"
 - `process_parameter_binned_rates.csv`
 - `process_model_importance.csv`
 - `process_relationship_summary.json`
+
+执行Excel质量分析会生成：
+
+- `excel_analysis_summary.json`、`excel_standardized_data.csv`
+- `excel_parameter_statistics.csv`、`excel_tolerance_violations.csv`
+- `excel_judgement_conflicts.csv`、`excel_group_quality.csv`
+- `excel_data_quality.csv`、`visualizations/quality_trend.png`
 
 取消任务会保留部分提取结果；失败任务保留错误编号、状态和 traceback。应用滚动日志位于当前用户的 `LOCALAPPDATA/MEA5SDefectAnalysis/logs/`。
 

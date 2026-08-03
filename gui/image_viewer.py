@@ -156,6 +156,7 @@ class ImageReviewWidget(QWidget):
         self.cards: dict[str, QWidget] = {}
         for name, view in self.views.items():
             card = QWidget()
+            card.setObjectName("imageCard")
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(2, 2, 2, 2)
             title = QLabel(name)
@@ -235,6 +236,7 @@ class ImageReviewWidget(QWidget):
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
         detail_widget = QWidget()
+        detail_widget.setObjectName("imageDetailPanel")
         detail_layout = QVBoxLayout(detail_widget)
         detail_title = QLabel("产品、缺陷与工艺参数")
         detail_title.setObjectName("sectionTitle")
@@ -243,6 +245,7 @@ class ImageReviewWidget(QWidget):
         detail_layout.addStretch()
         detail_scroll.setWidget(detail_widget)
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setObjectName("reviewSplitter")
         splitter.addWidget(view_container)
         splitter.addWidget(detail_scroll)
         splitter.setStretchFactor(0, 5)
