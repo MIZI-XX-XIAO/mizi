@@ -21,6 +21,8 @@ build/
 *.whl
 *.exe
 *.zip
+!releases/dmc-image-v2/
+!releases/dmc-image-v2/DMC图片整理工具_V2_便携版.zip
 *.7z
 *.tar
 *.gz
