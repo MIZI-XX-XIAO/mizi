@@ -120,3 +120,26 @@ def test_excel_analysis_honors_pre_cancelled_token(tmp_path: Path) -> None:
     result = analyze_excel_quality(ExcelAnalysisRequest(path, tmp_path, "取消测试"), token=token)
     assert result.status == "cancelled"
     assert not list(tmp_path.glob("取消测试_*"))
+
+
+def test_vi_profile_analyzes_categorical_failures_without_numeric_results(tmp_path: Path) -> None:
+    path = tmp_path / "vi.xlsx"
+    workbook = Workbook(); data = workbook.active; data.title = "Data"
+    data.append([
+        "Ident No.", "Result.AOI Result", "Block code", "Document Version", "fail1",
+        "Failures area", "Failures code", "Result.From", "StationNo",
+    ])
+    data.append(["DMC-1", "OK", "B1", "V1", "", "", "", "AOI", "12-2L3E4F"])
+    data.append(["DMC-2", "NOK", "B1", "V1", "surface", "[1]", "015050", "VI", "12-2L3E4F"])
+    query = workbook.create_sheet("Query parameter")
+    query.append(["Query parameter", None]); query.append(["Location(s)", "3002.35.1.1.1"])
+    workbook.save(path)
+
+    result = analyze_excel_quality(ExcelAnalysisRequest(path, tmp_path, "VI分析", excel_profile="vi"))
+    assert result.status == "complete"
+    assert result.summary["excel_profile"] == "vi"
+    assert result.summary["parameter_count"] == 0
+    assert result.summary["state_nok_count"] == 1
+    categorical = result.frames["categorical_stats"]
+    assert {"Failures area", "Failures code", "StationNo"}.issubset(set(categorical["字段"]))
+    assert (result.output_dir / "excel_categorical_statistics.csv").is_file()

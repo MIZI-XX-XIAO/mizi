@@ -52,6 +52,7 @@ class ExcelAnalysisPage(QWidget):
         self.thread: QThread | None = None
         self.worker: ExcelAnalysisWorker | None = None
         self.current_result: ExcelAnalysisResult | None = None
+        self.excel_profile = "auto"
         self._headers_by_sheet: dict[str, list[str]] = {}
 
         title = QLabel("Excel质量数据分析")
@@ -166,6 +167,7 @@ class ExcelAnalysisPage(QWidget):
             "group_stats": DataFrameTableWidget("excel_group_stats"),
             "trend": DataFrameTableWidget("excel_trend"),
             "quality": DataFrameTableWidget("excel_quality", alert_colors=True),
+            "categorical_stats": DataFrameTableWidget("excel_categorical_stats"),
             "standardized": DataFrameTableWidget("excel_standardized"),
             "preview": DataFrameTableWidget("excel_preview"),
         }
@@ -186,6 +188,7 @@ class ExcelAnalysisPage(QWidget):
             ("parameter_stats", "参数统计"), ("violations", "超差明细"),
             ("conflicts", "判定冲突"), ("group_stats", "分组对比"),
             ("trend", "质量趋势"), ("quality", "数据质量"), ("standardized", "标准化数据"),
+            ("categorical_stats", "AOI/VI分类统计"),
         ):
             self.result_tabs.addTab(self.tables[key], caption)
 
@@ -340,6 +343,7 @@ class ExcelAnalysisPage(QWidget):
                 data_sheet=self.data_sheet.currentText().strip() or "Data",
                 query_sheet=self.query_sheet.currentText().strip() or "Query parameter",
                 column_mapping=self._mapping(),
+                excel_profile=self.excel_profile,
             )
         except Exception as exc:
             QMessageBox.critical(self, "无法启动Excel分析", str(exc)); return

@@ -120,7 +120,7 @@ class NavigationRail(QFrame):
         brand.setObjectName("brandCard")
         brand_layout = QVBoxLayout(brand)
         brand_layout.setContentsMargins(14, 14, 14, 14)
-        self.brand_title = QLabel("◆  MEA 5S")
+        self.brand_title = QLabel("◆  MEA 多工站")
         self.brand_title.setObjectName("brandTitle")
         self.brand_caption = QLabel("DEFECT ANALYTICS")
         self.brand_caption.setObjectName("brandCaption")
@@ -180,7 +180,7 @@ class NavigationRail(QFrame):
             item = NAVIGATION_ITEMS[index]
             button.setText(item.icon if compact else f"{item.icon}   {item.title}")
             button.setToolTip(item.title if compact else item.subtitle)
-        self.brand_title.setText("M5" if compact else "◆  MEA 5S")
+        self.brand_title.setText("MEA" if compact else "◆  MEA 多工站")
         self.brand_title.setAlignment(Qt.AlignCenter if compact else Qt.AlignLeft)
         self.brand_caption.setVisible(not compact)
         self.user.setVisible(not compact)

@@ -19,7 +19,7 @@ def test_main_window_starts(qtbot) -> None:
     window = MainWindow(Path(__file__).resolve().parents[1])
     qtbot.addWidget(window)
     window.show()
-    assert window.windowTitle() == "MEA 5S 缺陷规律分析"
+    assert window.windowTitle() == "MEA多工站缺陷规律分析"
     assert window.tabs.count() == 7
     assert isinstance(window.tabs, WorkbenchStack)
     assert "Excel分析" in window.tabs.tabText(4)
@@ -125,4 +125,29 @@ def test_excel_page_runs_analysis_in_background(qtbot, tmp_path: Path) -> None:
     assert page.current_result.summary["tolerance_nok_count"] == 1
     assert window.current_excel_result is page.current_result
     assert window.use_current_excel.isEnabled()
+    window.close(); window.deleteLater()
+
+
+def test_station_task_builds_products_without_company_csv(qtbot, tmp_path: Path) -> None:
+    dmc = "376W020BGO57424F00VF004AK"
+    workbook = Workbook(); data = workbook.active; data.title = "Data"
+    data.append(["Ident No.", "State", "Result.Force", "Tolerance"])
+    data.append([dmc, "OK", 30, "25 ... 70"])
+    query = workbook.create_sheet("Query parameter")
+    query.append(["Query parameter", None]); query.append(["Location(s)", "3003.10.1.1.6"])
+    excel_path = tmp_path / "station.xlsx"; workbook.save(excel_path)
+    for code in ("DA", "DE"):
+        (tmp_path / f"{dmc}20250624{code}.png").write_bytes(b"index-only")
+
+    window = MainWindow(Path(__file__).resolve().parents[1])
+    qtbot.addWidget(window)
+    window.products_edit.clear()
+    window.station_combo.setCurrentIndex(window.station_combo.findData("35_5s_aoi"))
+    window.source_excel_edit.setText(str(excel_path))
+    window.image_root_edit.setText(str(tmp_path))
+    assert window._inspect_products()
+    assert len(window.loaded_products) == 1
+    assert len(window.analysis_products) == 1
+    assert window.analysis_products.iloc[0].a_image_path.endswith("DA.png")
+    assert window.analysis_products.iloc[0].e_image_path.endswith("DE.png")
     window.close(); window.deleteLater()

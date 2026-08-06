@@ -30,6 +30,7 @@ class ExcelAnalysisRequest:
     data_sheet: str = "Data"
     query_sheet: str = "Query parameter"
     column_mapping: dict[str, str] = field(default_factory=dict)
+    excel_profile: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ class ExcelWorkbookData:
     data_sheet: str
     query_sheet: str | None
     column_mapping: dict[str, str]
+    excel_profile: str
 
 
 @dataclass(frozen=True)
@@ -80,7 +82,7 @@ CORE_ALIASES = {
     "ttnr": ("ttnr",),
     "variant": ("variant",),
     "batch": ("batch", "batch id", "batch_id"),
-    "state": ("state", "state test", "result state"),
+    "state": ("state", "state test", "result state", "result.aoi result", "aoi result"),
     "line": ("line", "location", "location(s)"),
     "test_date": ("test date", "testdate", "test_date"),
     "result_timestamp": (
@@ -256,11 +258,47 @@ def _parameter_specs(
     return specs
 
 
+def _resolve_excel_profile(originals: list[str], requested: str) -> str:
+    if requested not in {"auto", "wp", "aoi", "vi"}:
+        raise ValueError(f"未知Excel分析档：{requested}")
+    if requested != "auto":
+        return requested
+    normalized = {_normalized_header(value) for value in originals}
+    if normalized & {"failuresarea", "failurescode", "stationno", "documentversion"}:
+        return "vi"
+    if "aoifailurecode" in normalized:
+        return "aoi"
+    return "wp"
+
+
+def _categorical_statistics(frame: pd.DataFrame, originals: list[str], profile: str) -> pd.DataFrame:
+    wanted = {
+        "aoi": {"aoifailurecode"},
+        "vi": {
+            "blockcode", "documentversion", "fail1", "failuresarea", "failurescode",
+            "resultaoiresult", "resultfrom", "stationno",
+        },
+    }.get(profile, set())
+    rows: list[dict[str, Any]] = []
+    for column, original in zip(frame.columns, originals):
+        if _normalized_header(original) not in wanted:
+            continue
+        values = frame[column].dropna().astype(str).str.strip()
+        values = values[values.ne("")]
+        for value, count in values.value_counts(dropna=False).items():
+            rows.append({
+                "字段": str(original), "值": value, "数量": int(count),
+                "占比": float(count / len(values)) if len(values) else np.nan,
+            })
+    return pd.DataFrame(rows, columns=["字段", "值", "数量", "占比"])
+
+
 def load_excel_workbook(
     path: Path,
     data_sheet: str = "Data",
     query_sheet: str = "Query parameter",
     column_mapping: dict[str, str] | None = None,
+    excel_profile: str = "auto",
 ) -> ExcelWorkbookData:
     """读取真实工作簿并保留原始列，同时生成统一业务字段和参数定义。"""
     resolved = path.resolve()
@@ -280,6 +318,7 @@ def load_excel_workbook(
     finally:
         workbook.close()
 
+    resolved_profile = _resolve_excel_profile(originals, excel_profile)
     report = DataQualityReport("Excel测试数据", len(raw), len(raw.columns))
     if raw.empty:
         report.errors.append("Data工作表没有数据行")
@@ -321,8 +360,10 @@ def load_excel_workbook(
     if duplicates:
         report.warnings.append(f"Ident No. 有 {duplicates} 个重复值，将保留全部测试记录")
     specs = _parameter_specs(raw, columns, originals, report)
-    if not specs:
+    if not specs and resolved_profile != "vi":
         report.errors.append("未识别任何 Result.* 参数列")
+    elif not specs:
+        report.warnings.append("VI工作簿没有数值Result.*参数，将执行分类失效项统计")
     report.metrics.update({
         "记录数量": len(data), "字段数量": len(raw.columns), "参数数量": len(specs),
         "可解析容差参数": sum(spec.parse_status in {"valid", "partially_invalid"} for spec in specs),
@@ -332,7 +373,7 @@ def load_excel_workbook(
     return ExcelWorkbookData(
         raw_data=raw, data=data, query_parameters=query, parameter_specs=specs,
         quality_report=report, data_sheet=data_sheet, query_sheet=query_name,
-        column_mapping=mapping,
+        column_mapping=mapping, excel_profile=resolved_profile,
     )
 
 
@@ -423,7 +464,8 @@ def analyze_excel_quality(
     token = token or CancellationToken()
     callbacks.on_progress(ExcelProgressEvent("LOADING", 5, "读取工作簿"))
     workbook_data = load_excel_workbook(
-        request.workbook_path, request.data_sheet, request.query_sheet, request.column_mapping
+        request.workbook_path, request.data_sheet, request.query_sheet,
+        request.column_mapping, request.excel_profile,
     )
     if workbook_data.quality_report.errors:
         raise ValueError("Excel数据检查失败：" + "；".join(workbook_data.quality_report.errors))
@@ -493,7 +535,16 @@ def analyze_excel_quality(
         "source_row", "dmc_raw", "参数", "值", "下限", "上限", "Tolerance原值"
     ])
     conflict_frame = frame[frame["judgement_conflict"]].copy()
-    parameter_stats = pd.DataFrame(stats).sort_values("超差数", ascending=False, ignore_index=True)
+    parameter_stat_columns = [
+        "参数", "有效数值", "缺失率", "最小值", "最大值", "均值", "常用下限", "常用上限",
+        "可判定数", "超差数", "超差率", "容差状态",
+    ]
+    parameter_stats = pd.DataFrame(stats, columns=parameter_stat_columns)
+    if not parameter_stats.empty:
+        parameter_stats = parameter_stats.sort_values("超差数", ascending=False, ignore_index=True)
+    categorical_stats = _categorical_statistics(
+        workbook_data.raw_data, list(workbook_data.raw_data.columns), workbook_data.excel_profile
+    )
     group_stats = _group_quality(frame, ("variant", "batch", "line", "ttnr"))
     time_column = next((name for name in ("result_timestamp", "test_date") if name in frame), None)
     trend = pd.DataFrame(columns=["date", "records", "state_nok_rate", "tolerance_nok_rate"])
@@ -512,6 +563,7 @@ def analyze_excel_quality(
     summary = {
         "status": "complete", "workbook": str(request.workbook_path.resolve()),
         "data_sheet": workbook_data.data_sheet, "query_sheet": workbook_data.query_sheet,
+        "excel_profile": workbook_data.excel_profile,
         "record_count": len(frame), "parameter_count": len(workbook_data.parameter_specs),
         "state_ok_count": int(frame["state_result"].eq("OK").sum()),
         "state_nok_count": int(frame["state_result"].eq("NOK").sum()),
@@ -535,6 +587,7 @@ def analyze_excel_quality(
     output_dir.mkdir(parents=False)
     frame.to_csv(output_dir / "excel_standardized_data.csv", index=False, encoding="utf-8-sig")
     parameter_stats.to_csv(output_dir / "excel_parameter_statistics.csv", index=False, encoding="utf-8-sig")
+    categorical_stats.to_csv(output_dir / "excel_categorical_statistics.csv", index=False, encoding="utf-8-sig")
     violation_frame.to_csv(output_dir / "excel_tolerance_violations.csv", index=False, encoding="utf-8-sig")
     conflict_frame.to_csv(output_dir / "excel_judgement_conflicts.csv", index=False, encoding="utf-8-sig")
     group_stats.to_csv(output_dir / "excel_group_quality.csv", index=False, encoding="utf-8-sig")
@@ -559,5 +612,5 @@ def analyze_excel_quality(
     return ExcelAnalysisResult("complete", output_dir, summary, {
         "standardized": frame, "parameter_stats": parameter_stats, "violations": violation_frame,
         "conflicts": conflict_frame, "group_stats": group_stats, "trend": trend,
-        "quality": workbook_data.quality_report.to_frame(),
+        "quality": workbook_data.quality_report.to_frame(), "categorical_stats": categorical_stats,
     }, workbook_data)

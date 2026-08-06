@@ -23,7 +23,7 @@ from src.analysis_service import (
     AnalysisRequest, AnalysisResult, ProgressEvent, resolve_image_path,
 )
 from src.app_runtime import APP_VERSION, configure_logging, new_error_id, user_data_dir
-from src.data_quality import validate_products
+from src.data_quality import DataQualityReport, validate_products
 from src.defect_relationships import analyze_defect_relationships
 from src.process_relationships import analyze_process_relationships
 from .image_viewer import ImageReviewWidget
@@ -33,15 +33,21 @@ from .parameter_dialog import ParameterDialog
 from .workbench import ElidedLabel, LayoutProfile, WorkbenchShell, WorkbenchStack
 from .excel_analysis_page import ExcelAnalysisPage
 from src.excel_analysis import ExcelAnalysisResult, excel_relationship_frame, load_excel_workbook
+from src.station_sources import (
+    build_image_product_index,
+    load_station_catalog,
+    validate_selected_station,
+)
 
 
 class MainWindow(QMainWindow):
     def __init__(self, project_root: Path) -> None:
         super().__init__()
         self.project_root = project_root.resolve()
+        self.station_catalog = load_station_catalog(self.project_root / "config/stations.yaml")
         self.settings = QSettings()
         self.logger, self.log_path = configure_logging()
-        self.setWindowTitle("MEA 5S 缺陷规律分析")
+        self.setWindowTitle("MEA多工站缺陷规律分析")
         self.setMinimumSize(980, 620)
         self._set_adaptive_initial_size()
         self.config_snapshot = yaml.safe_load(
@@ -54,6 +60,9 @@ class MainWindow(QMainWindow):
         self.current_excel_result: ExcelAnalysisResult | None = None
         self._result_config: dict[str, Any] = {}
         self.loaded_products = pd.DataFrame()
+        self.analysis_products = pd.DataFrame()
+        self._station_issues = pd.DataFrame()
+        self._auto_relationship_pending = False
         self._close_after_cancel = False
         self._analysis_started = 0.0
         self._restore_maximized = False
@@ -126,21 +135,27 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         title = QLabel("新建分析任务")
         title.setObjectName("pageTitle")
-        intro = QLabel("选择产品清单和图片位置。执行前先检查数据，避免任务运行到中途失败。")
+        intro = QLabel("选择工站、Excel和/或图片目录；程序会按Ident No.自动建立产品索引。")
         intro.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(intro)
         data_group = QGroupBox("数据源")
         form = QFormLayout(data_group)
-        example_products = self.project_root / "data/dataset_realistic/products.csv"
-        default_products = example_products if example_products.is_file() else ""
-        self.products_edit, row = self._path_row(
-            self._saved_path("paths/products", default_products), True, "CSV (*.csv)"
+        self.station_combo = QComboBox()
+        for station in self.station_catalog.stations:
+            self.station_combo.addItem(station.display_name, station.id)
+        saved_station = str(self.settings.value("station/id", "35_5s_aoi"))
+        station_index = self.station_combo.findData(saved_station)
+        self.station_combo.setCurrentIndex(station_index if station_index >= 0 else 0)
+        form.addRow("工站", self.station_combo)
+        self.source_excel_edit, row = self._path_row(
+            self._saved_path("paths/source_excel", ""), True, "Excel工作簿 (*.xlsx *.xlsm)"
         )
-        form.addRow("产品清单", row)
+        self.source_excel_edit.setPlaceholderText("可选；用于工艺/质量分析并提供Ident No.")
+        form.addRow("Excel工作簿（可选）", row)
         saved_image_root = str(self.settings.value("paths/image_root", ""))
         self.image_root_edit, row = self._path_row(saved_image_root, False)
-        self.image_root_edit.setPlaceholderText("CSV相对路径需要重新定位时填写")
+        self.image_root_edit.setPlaceholderText("可选；会递归扫描下载的多视图图片")
         form.addRow("图片根目录（可选）", row)
         output_group = QGroupBox("任务与结果")
         form = QFormLayout(output_group)
@@ -161,6 +176,9 @@ class MainWindow(QMainWindow):
             ), True, "YAML (*.yaml *.yml)"
         )
         form.addRow("分析配置", row)
+        self.products_edit, row = self._path_row("", True, "CSV (*.csv)")
+        self.products_edit.setPlaceholderText("仅用于旧数据集/开发验收，公司日常任务无需填写")
+        form.addRow("旧版产品CSV（可选）", row)
         params = QPushButton("编辑分析参数…")
         params.clicked.connect(self._edit_parameters)
         form.addRow("", params)
@@ -377,6 +395,7 @@ class MainWindow(QMainWindow):
             f"当前Excel结果已就绪：{result.summary['record_count']}条记录、"
             f"{result.summary['parameter_count']}个参数。可直接执行图片缺陷关联分析。"
         )
+        self._maybe_auto_relationship()
 
     def _build_status_bar(self) -> None:
         status = QStatusBar()
@@ -440,35 +459,105 @@ class MainWindow(QMainWindow):
 
     def _inspect_products(self) -> bool:
         try:
-            path = Path(self.products_edit.text().strip())
-            if not path.is_file():
-                raise FileNotFoundError(f"产品清单不存在：{path}")
-            frame = pd.read_csv(path)
-            report = validate_products(frame)
-            source = "a_image_path" if "a_image_path" in frame else "v_image_path"
-            image_root = (
-                Path(self.image_root_edit.text().strip())
-                if self.image_root_edit.text().strip() else None
-            )
-            missing: list[str] = []
-            if report.is_valid:
-                for row in frame.itertuples(index=False):
-                    for column in (source, "e_image_path"):
-                        resolved = resolve_image_path(
-                            str(getattr(row, column)), self.project_root, image_root, path
-                        )
-                        if not resolved.is_file():
-                            missing.append(str(resolved))
-                            if len(missing) >= 10:
-                                break
-                    if len(missing) >= 10:
-                        break
-            if missing:
-                report.errors.append(
-                    "图片路径不存在（最多列出10项）：" + "；".join(missing)
-                )
-            self.loaded_products = frame
-            self.quality_table.set_frame(report.to_frame())
+            legacy_text = self.products_edit.text().strip()
+            if legacy_text:
+                path = Path(legacy_text)
+                if not path.is_file():
+                    raise FileNotFoundError(f"旧版产品清单不存在：{path}")
+                frame = pd.read_csv(path)
+                report = validate_products(frame)
+                source = "a_image_path" if "a_image_path" in frame else "v_image_path"
+                image_root = Path(self.image_root_edit.text().strip()) if self.image_root_edit.text().strip() else None
+                missing: list[str] = []
+                if report.is_valid:
+                    for row in frame.itertuples(index=False):
+                        for column in (source, "e_image_path"):
+                            resolved = resolve_image_path(str(getattr(row, column)), self.project_root, image_root, path)
+                            if not resolved.is_file():
+                                missing.append(str(resolved))
+                                if len(missing) >= 10:
+                                    break
+                        if len(missing) >= 10:
+                            break
+                if missing:
+                    report.errors.append("图片路径不存在（最多列出10项）：" + "；".join(missing))
+                self.loaded_products = frame
+                self.analysis_products = frame
+                self._station_issues = pd.DataFrame()
+            else:
+                station = self.station_catalog.station(str(self.station_combo.currentData()))
+                excel_text = self.source_excel_edit.text().strip()
+                image_text = self.image_root_edit.text().strip()
+                if not excel_text and not image_text:
+                    raise ValueError("请至少选择Excel工作簿或图片根目录")
+                excel_dmcs: list[str] | None = None
+                excel_data = None
+                station_warnings: list[str] = []
+                if excel_text:
+                    excel_path = Path(excel_text)
+                    if not excel_path.is_file():
+                        raise FileNotFoundError(f"Excel工作簿不存在：{excel_path}")
+                    excel_data = load_excel_workbook(excel_path)
+                    station_warnings.extend(
+                        validate_selected_station(station, excel_data.query_parameters, self.station_catalog)
+                    )
+                    if "dmc_raw" in excel_data.data:
+                        excel_dmcs = excel_data.data["dmc_raw"].dropna().astype(str).str.strip().tolist()
+                    else:
+                        excel_dmcs = []
+                if image_text:
+                    indexed = build_image_product_index(
+                        Path(image_text), station, self.station_catalog, excel_dmcs
+                    )
+                    self.loaded_products = indexed.products
+                    self._station_issues = indexed.issues
+                    scanned_count = indexed.scanned_file_count
+                else:
+                    unique_dmcs = list(dict.fromkeys(excel_dmcs or []))
+                    self.loaded_products = pd.DataFrame({
+                        "global_order": range(1, len(unique_dmcs) + 1),
+                        "dmc_raw": unique_dmcs,
+                        "order_code": unique_dmcs,
+                        "camera": station.image_profile,
+                        "station_id": station.id,
+                        "station_location": station.location,
+                        "has_excel_record": True,
+                        "has_primary_pair": False,
+                    })
+                    self._station_issues = pd.DataFrame()
+                    scanned_count = 0
+                self.analysis_products = self.loaded_products[
+                    self.loaded_products.get("has_primary_pair", False).eq(True)
+                ].copy() if not self.loaded_products.empty else pd.DataFrame()
+                if not self.analysis_products.empty:
+                    self.analysis_products["global_order"] = range(1, len(self.analysis_products) + 1)
+                report = DataQualityReport("工站任务", len(self.loaded_products), len(self.loaded_products.columns))
+                report.warnings.extend(station_warnings)
+                if excel_data is not None:
+                    report.warnings.extend(excel_data.quality_report.warnings)
+                    report.warnings.extend(excel_data.quality_report.errors)
+                error_issues = int(self._station_issues.get("级别", pd.Series(dtype=str)).eq("错误").sum())
+                report.metrics.update({
+                    "所选工站": station.display_name,
+                    "Excel Ident No.": len(set(excel_dmcs or [])),
+                    "扫描图片文件": scanned_count,
+                    "建立产品索引": len(self.loaded_products),
+                    "可运行主图对": len(self.analysis_products),
+                    "缺图/异常项": len(self._station_issues),
+                })
+                if error_issues:
+                    report.errors.append(f"发现 {error_issues} 个需人工解决的重复视图")
+                if image_text and self.analysis_products.empty:
+                    report.warnings.append("未找到完整主图对；可继续Excel分析，不运行图片算法")
+            quality_frame = report.to_frame()
+            if not self._station_issues.empty:
+                issue_frame = pd.DataFrame({
+                    "级别": self._station_issues["级别"],
+                    "项目": "DMC " + self._station_issues["DMC"].fillna("").astype(str),
+                    "结果": self._station_issues["问题"] + self._station_issues["文件"].map(lambda value: f"；{value}" if value else ""),
+                })
+                quality_frame = pd.concat([quality_frame, issue_frame], ignore_index=True)
+            self.quality_table.set_frame(quality_frame)
             self.quality_summary.setText(
                 f"{'检查通过' if report.is_valid else '检查未通过'}："
                 f"{report.row_count} 行、{report.column_count} 列；"
@@ -507,11 +596,36 @@ class MainWindow(QMainWindow):
             config_path = Path(self.config_edit.text().strip())
             if not self.config_modified:
                 self.config_snapshot = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            self.current_result = None
+            self.current_excel_result = None
+            self.use_current_excel.setEnabled(False)
+            self.use_current_excel.setChecked(False)
+            excel_path = Path(self.source_excel_edit.text().strip()) if self.source_excel_edit.text().strip() else None
+            if excel_path is not None and not (self.excel_page.thread and self.excel_page.thread.isRunning()):
+                station = self.station_catalog.station(str(self.station_combo.currentData()))
+                self.excel_page.excel_profile = station.excel_profile
+                self.excel_page.workbook_edit.setText(str(excel_path))
+                self.excel_page.output_edit.setText(str(output))
+                self.excel_page.task_name.setText(self.task_edit.text())
+                self.excel_page.start_analysis()
+            if self.analysis_products.empty:
+                if excel_path is not None:
+                    self.statusBar().showMessage("未找到完整主图对，已启动Excel分析", 8000)
+                    self.tabs.setCurrentIndex(4)
+                    return
+                raise ValueError("没有可运行图片算法的完整主图对")
+            legacy_path = Path(self.products_edit.text().strip()) if self.products_edit.text().strip() else None
+            source_files = (excel_path,) if excel_path is not None else ()
             request = AnalysisRequest(
-                Path(self.products_edit.text().strip()), config_path, output, self.task_edit.text(),
+                legacy_path, config_path, output, self.task_edit.text(),
                 Path(self.image_root_edit.text()) if self.image_root_edit.text().strip() else None,
                 dict(self.config_snapshot),
+                products_frame=None if legacy_path is not None else self.analysis_products,
+                source_files=source_files,
+                source_index_frame=None if legacy_path is not None else self.loaded_products,
+                source_issues_frame=None if self._station_issues.empty else self._station_issues,
             )
+            self._auto_relationship_pending = excel_path is not None
         except Exception as exc:
             self._show_error("无法启动分析", exc)
             return
@@ -600,6 +714,26 @@ class MainWindow(QMainWindow):
         self.workbench.header.set_run_state("分析完成", "success")
         QMessageBox.information(self, "分析完成", f"结果目录：\n{result.output_dir}")
         self.tabs.setCurrentIndex(3)
+        self._maybe_auto_relationship()
+
+    def _maybe_auto_relationship(self) -> None:
+        """统一工站任务的Excel和图片都完成后自动关联。"""
+        if (
+            not self._auto_relationship_pending
+            or self.current_result is None
+            or self.current_excel_result is None
+        ):
+            return
+        if int(self.current_excel_result.summary.get("parameter_count", 0)) == 0:
+            self._auto_relationship_pending = False
+            self.relationship_summary.setText(
+                "当前为无数值工艺参数的VI类工作簿；已完成分类失效统计，"
+                "不执行数值参数与图片缺陷的相关模型。"
+            )
+            return
+        self._auto_relationship_pending = False
+        self.use_current_excel.setChecked(True)
+        self._analyze_process_parameters()
 
     def _populate_filters(self, products: pd.DataFrame, defects: pd.DataFrame) -> None:
         widgets = (
@@ -807,12 +941,14 @@ class MainWindow(QMainWindow):
     def _save_settings(self) -> None:
         for key, value in (
             ("paths/products", self.products_edit.text()), ("paths/config", self.config_edit.text()),
+            ("paths/source_excel", self.source_excel_edit.text()),
             ("paths/output", self.output_edit.text()), ("paths/image_root", self.image_root_edit.text()),
             ("paths/process", self.process_edit.text()), ("task/name", self.task_edit.text()),
             ("process/tolerance_seconds", self.time_tolerance.value()),
             ("review/layout", self.review.layout_combo.currentText()),
         ):
             self.settings.setValue(key, value)
+        self.settings.setValue("station/id", self.station_combo.currentData())
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("window/maximized", self.isMaximized())
         self.settings.setValue(

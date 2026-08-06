@@ -44,12 +44,16 @@ def load_analysis_config(path: Path) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class AnalysisRequest:
-    products_path: Path
+    products_path: Path | None
     config_path: Path
     output_parent: Path
     task_name: str
     image_root: Path | None = None
     config_snapshot: dict[str, Any] | None = None
+    products_frame: pd.DataFrame | None = None
+    source_files: tuple[Path, ...] = ()
+    source_index_frame: pd.DataFrame | None = None
+    source_issues_frame: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -119,9 +123,9 @@ def resolve_image_path(
 
 
 def validate_analysis_request(request: AnalysisRequest) -> tuple[pd.DataFrame, dict[str, Any], Path, bool]:
-    products_path = request.products_path.resolve()
+    products_path = request.products_path.resolve() if request.products_path is not None else None
     config_path = request.config_path.resolve()
-    if not products_path.is_file():
+    if request.products_frame is None and (products_path is None or not products_path.is_file()):
         raise FileNotFoundError(f"products.csv不存在：{products_path}")
     if request.config_snapshot is None and not config_path.is_file():
         raise FileNotFoundError(f"分析配置不存在：{config_path}")
@@ -129,7 +133,11 @@ def validate_analysis_request(request: AnalysisRequest) -> tuple[pd.DataFrame, d
         raise FileNotFoundError(f"输出父目录不存在：{request.output_parent}")
     _safe_task_name(request.task_name)
     config = dict(request.config_snapshot) if request.config_snapshot is not None else load_analysis_config(config_path)
-    products = pd.read_csv(products_path)
+    products = (
+        request.products_frame.copy()
+        if request.products_frame is not None
+        else pd.read_csv(products_path)
+    )
     required = {"global_order", "order_code", "dmc_raw", "camera", "e_image_path"}
     if missing := required - set(products.columns):
         raise ValueError(f"products.csv缺少字段：{sorted(missing)}")
@@ -138,8 +146,10 @@ def validate_analysis_request(request: AnalysisRequest) -> tuple[pd.DataFrame, d
         raise ValueError("products.csv必须包含a_image_path（或兼容字段v_image_path）")
     if products.empty or products["global_order"].duplicated().any() or not products["global_order"].is_monotonic_increasing:
         raise ValueError("global_order必须非空、唯一且严格递增")
-    if set(products["camera"].astype(str)) != {"5S"}:
-        raise ValueError("第一阶段只允许camera=5S")
+    supported_cameras = {"5S", "5X", "7S", "7X"}
+    unknown_cameras = set(products["camera"].astype(str)) - supported_cameras
+    if unknown_cameras:
+        raise ValueError(f"存在未配置的图片产品族：{sorted(unknown_cameras)}")
     project_root = config_path.parent.parent
     source_column = "v_image_path" if use_legacy else "a_image_path"
     products = products.copy()
@@ -196,12 +206,23 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
     try:
         callbacks.on_stage("VALIDATING")
         products, config, project_root, use_legacy = validate_analysis_request(request)
+        input_files: dict[str, Any] = {}
+        if request.products_path is not None:
+            input_files["products"] = file_fingerprint(request.products_path.resolve())
+        for index, source in enumerate(request.source_files, 1):
+            resolved_source = source.resolve()
+            if resolved_source.is_file():
+                input_files[f"source_{index}"] = file_fingerprint(resolved_source)
         manifest = {
             **runtime_metadata(),
             "task_name": request.task_name,
-            "input_files": {"products": file_fingerprint(request.products_path.resolve())},
+            "input_files": input_files,
             "input_summary": {
                 "product_count": len(products),
+                "source_index_count": (
+                    len(request.source_index_frame)
+                    if request.source_index_frame is not None else len(products)
+                ),
                 "columns": list(products.columns),
                 "order_min": int(products.global_order.min()),
                 "order_max": int(products.global_order.max()),
@@ -213,6 +234,16 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
         write_json(work_dir / "task_manifest.json", manifest)
         with (work_dir / "analysis_config_snapshot.yaml").open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
+        source_index = request.source_index_frame if request.source_index_frame is not None else products
+        source_index.to_csv(work_dir / "station_product_index.csv", index=False, encoding="utf-8-sig")
+        source_issues = (
+            request.source_issues_frame
+            if request.source_issues_frame is not None
+            else pd.DataFrame(columns=["级别", "DMC", "文件", "问题"])
+        )
+        source_issues.to_csv(
+            work_dir / "station_source_issues.csv", index=False, encoding="utf-8-sig"
+        )
         total = len(products)
         callbacks.on_progress(ProgressEvent("VALIDATING", None, 0, total, 2, 0))
         if token.is_cancelled:

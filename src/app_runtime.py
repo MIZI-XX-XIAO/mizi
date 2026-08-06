@@ -17,10 +17,10 @@ import tempfile
 import uuid
 
 
-APP_NAME = "MEA 5S 缺陷规律分析"
+APP_NAME = "MEA多工站缺陷规律分析"
 APP_SLUG = "MEA5SDefectAnalysis"
-APP_VERSION = "2.0.0"
-ALGORITHM_VERSION = "2.0"
+APP_VERSION = "2.1.0"
+ALGORITHM_VERSION = "2.1"
 
 
 def user_data_dir() -> Path:

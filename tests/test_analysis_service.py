@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.analysis_service import (
     AnalysisCallbacks, AnalysisRequest, CancellationToken, resolve_image_path, run_analysis_task,
+    validate_analysis_request,
 )
 
 
@@ -82,3 +83,22 @@ def test_relative_image_path_is_resolved_from_products_csv_ancestors(tmp_path: P
     )
 
     assert resolved == image_path.resolve()
+
+
+def test_analysis_request_accepts_runtime_product_index(tmp_path: Path) -> None:
+    a_path, e_path = tmp_path / "runtime_a.png", tmp_path / "runtime_e.png"
+    image = np.zeros((32, 32), dtype=np.uint8)
+    annotated = np.zeros((32, 32, 3), dtype=np.uint8)
+    cv2.imencode(".png", image)[1].tofile(str(a_path))
+    cv2.imencode(".png", annotated)[1].tofile(str(e_path))
+    products = pd.DataFrame({
+        "global_order": [1], "order_code": ["DMC-1"], "dmc_raw": ["DMC-1"],
+        "camera": ["7X"], "a_image_path": [str(a_path)], "e_image_path": [str(e_path)],
+    })
+    request = AnalysisRequest(
+        None, PROJECT_ROOT / "config/analysis_config.yaml", tmp_path, "运行时索引",
+        products_frame=products, source_index_frame=products,
+    )
+    loaded, _config, _root, _legacy = validate_analysis_request(request)
+    assert loaded.loc[0, "camera"] == "7X"
+    assert Path(loaded.loc[0, "a_image_path"]) == a_path.resolve()

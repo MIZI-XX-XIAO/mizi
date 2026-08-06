@@ -1,14 +1,14 @@
 <!-- 本文件说明生产缺陷分析软件的安装、输入数据、界面流程、输出结果、测试和发布方法。 -->
-# MEA 5S 缺陷规律与工艺关联分析
+# MEA多工站缺陷规律与工艺关联分析
 
-本项目是一套完全本地运行的 Windows 桌面软件，用于从成对 A/E 图片中提取缺陷、发现空间与时间规律、生成预警，并分析工艺参数与缺陷之间的统计关系。程序不上传图片、不调用云服务，也不依赖独立显卡。
+本项目是一套完全本地运行的 Windows 桌面软件，覆盖 3-5、5-7 和 Conveyor 的18个工站。程序按工站和 Ident No. 自动组织多视图图片，从主图对提取缺陷，并分析Excel工艺/质量数据与图片缺陷的统计关系。程序不上传生产数据。
 
 ## 软件界面
 
 界面采用七个工作模块：
 
-1. 新建任务：选择产品清单、图片根目录、结果目录和分析参数。
-2. 数据检查：检查字段、产品序号、空值及图片路径。
+1. 新建任务：选择工站、Excel工作簿、图片根目录、结果目录和分析参数。
+2. 数据检查：校验Excel的Location(s)，并检查DMC匹配、多视图覆盖、重复图和缺图。
 3. 执行分析：后台提取缺陷并显示进度、资源使用、预计时间和实时告警。
 4. 结果概览：查看规律、预警、缺陷共现和序列关系，支持筛选、排序、搜索和导出。
 5. Excel分析：读取测试工作簿，统计State、Tolerance超差、判定冲突、趋势和分组质量。
@@ -19,13 +19,13 @@
 
 ## 输入数据
 
-产品 CSV 每行代表一个产品，至少需要 `global_order`、`camera`、`a_image_path`（兼容 `v_image_path`）和 `e_image_path`。推荐同时提供 `order_code`、`dmc_raw`、`product_id`、`batch`、`machine`、`line`、`recipe` 和 `production_timestamp`。
+公司日常使用不需要产品 CSV。图片文件名按 `Ident No.+YYYYMMDD+图片代码` 解析，例如 `376W...004AK20250624DA.png`。程序根据所选工站自动识别5S的`DA/DC/DE/DX/DY`、5X的`EA/EB/EC/EE/EX/EY`、7S的`FA/FC/FE/FX/FY`和7X的`GA/GC/GE/GX/GY`。现有算法使用A/E视图主对，其他视图同时建档。
 
-相对图片路径默认相对于项目目录解析，也可在界面指定图片根目录。A/E图片必须为8位、宽高一致并严格对齐；A图可为灰度图，E图为彩色图且AOI缺陷轮廓应以红色标记。
+下载的Excel与图片可以放在不同目录，程序按 Ident No. 精确重新汇合。Excel有Location(s)且与界面工站不一致时会阻止任务；Excel有记录但缺图时保留记录并报告覆盖率，只跳过该产品的图片算法。
 
 工艺参数 CSV 应包含 `product_id`、`order_code`、`dmc_raw` 或 `global_order` 之一进行精确关联。没有共同产品键时，可使用 `production_timestamp` 或 `timestamp` 按界面容差就近匹配。其他数值列作为工艺参数参与分析。统计关联不代表因果关系。
 
-Excel质量分析支持`.xlsx`和`.xlsm`，默认读取`Data`和`Query parameter`工作表。程序会将`Ident No.`标准化为`dmc_raw`，按列位置配对`Result.*`与其后的重复`Tolerance`列，并分别保留原始`State`和系统容差判定。两种判定不一致的记录会进入冲突表，不会覆盖原始结果。Excel可独立分析；完成图片分析后，也可按产品码或时间执行联合分析。
+Excel质量分析支持`.xlsx`和`.xlsm`，并按工站分为WP、AOI、VI三种分析档。WP/AOI保留`Result.*`与`Tolerance`重算；AOI额外统计`AOIFailureCode`；VI在没有数值容差时统计Block code、Document Version、fail1、Failures area/code、Result.From和StationNo。
 
 ## 从GitHub部署到公司电脑
 
@@ -48,7 +48,7 @@ git pull --ff-only
 .\run_gui.bat
 ```
 
-如果本机存在`data/dataset_realistic/products.csv`，界面仍会将其作为默认产品清单；GitHub克隆环境没有示例数据时，该输入框保持空白。
+旧版`products.csv`仅保留在高级设置中用于历史数据集和开发验收，公司任务不再依赖该文件。
 
 ## 开发与测试
 
@@ -91,6 +91,9 @@ $env:MEA5S_REAL_DATA_ROOT="D:\本地数据\dataset_realistic"
 - `excel_parameter_statistics.csv`、`excel_tolerance_violations.csv`
 - `excel_judgement_conflicts.csv`、`excel_group_quality.csv`
 - `excel_data_quality.csv`、`visualizations/quality_trend.png`
+- `excel_categorical_statistics.csv`（AOI/VI分类失效统计）
+
+图片任务还会保存`station_product_index.csv`和`station_source_issues.csv`，用于追溯Excel记录、多视图路径、缺图和重复图。
 
 取消任务会保留部分提取结果；失败任务保留错误编号、状态和 traceback。应用滚动日志位于当前用户的 `LOCALAPPDATA/MEA5SDefectAnalysis/logs/`。
 

@@ -1,0 +1,40 @@
+# 本文件定义公司18个工站、Excel类型与多视图图片命名规则。
+image_profiles:
+  5S:
+    family_code: D
+    views: [A, C, E, X, Y]
+    primary_pair: [A, E]
+  5X:
+    family_code: E
+    views: [A, B, C, E, X, Y]
+    primary_pair: [A, E]
+  7S:
+    family_code: F
+    views: [A, C, E, X, Y]
+    primary_pair: [A, E]
+  7X:
+    family_code: G
+    views: [A, C, E, X, Y]
+    primary_pair: [A, E]
+
+stations:
+  - {id: "35_wp1", group: "3-5", name: "WP1", location: "3003.10.1.1.1", station_type: "wp", image_profile: "5S", excel_profile: "wp"}
+  - {id: "35_wp2", group: "3-5", name: "WP2", location: "3003.10.1.1.2", station_type: "wp", image_profile: "5S", excel_profile: "wp"}
+  - {id: "35_wp3", group: "3-5", name: "WP3", location: "3003.10.1.1.3", station_type: "wp", image_profile: "5S", excel_profile: "wp"}
+  - {id: "35_wp4", group: "3-5", name: "WP4", location: "3003.10.1.1.4", station_type: "wp", image_profile: "5S", excel_profile: "wp"}
+  - {id: "35_wp5", group: "3-5", name: "WP5", location: "3003.10.1.1.5", station_type: "wp", image_profile: "5S", excel_profile: "wp"}
+  - {id: "35_5s_aoi", group: "3-5", name: "5s_AOI", location: "3003.10.1.1.6", station_type: "aoi", image_profile: "5S", excel_profile: "aoi"}
+  - {id: "35_5s_vi", group: "3-5", name: "5s_VI", location: "3002.35.1.1.1", station_type: "vi", image_profile: "5S", excel_profile: "vi"}
+
+  - {id: "57_wp1", group: "5-7", name: "WP1", location: "3004.20.1.1.1", station_type: "wp", image_profile: "5X", excel_profile: "wp"}
+  - {id: "57_wp2", group: "5-7", name: "WP2", location: "3004.20.1.1.2", station_type: "wp", image_profile: "5X", excel_profile: "wp"}
+  - {id: "57_wp3", group: "5-7", name: "WP3", location: "3004.20.1.1.3", station_type: "wp", image_profile: "5X", excel_profile: "wp"}
+  - {id: "57_wp4", group: "5-7", name: "WP4", location: "3004.20.1.1.4", station_type: "wp", image_profile: "5X", excel_profile: "wp"}
+  - {id: "57_wp5", group: "5-7", name: "WP5", location: "3004.20.1.1.5", station_type: "wp", image_profile: "5X", excel_profile: "wp"}
+  - {id: "57_5x_aoi", group: "5-7", name: "5x_AOI", location: "3004.20.1.1.6", station_type: "aoi", image_profile: "5X", excel_profile: "aoi"}
+  - {id: "57_5x_vi", group: "5-7", name: "5x_VI", location: "3002.35.1.1.2", station_type: "vi", image_profile: "5X", excel_profile: "vi"}
+
+  - {id: "conveyor_7s_aoi", group: "Conveyor", name: "7s_AOI", location: "3002.30.1.1.1", station_type: "aoi", image_profile: "7S", excel_profile: "aoi"}
+  - {id: "conveyor_7s_vi", group: "Conveyor", name: "7s_VI", location: "3002.35.1.1.3", station_type: "vi", image_profile: "7S", excel_profile: "vi"}
+  - {id: "conveyor_7x_aoi", group: "Conveyor", name: "7x_AOI", location: "3002.30.1.1.2", station_type: "aoi", image_profile: "7X", excel_profile: "aoi"}
+  - {id: "conveyor_7x_vi", group: "Conveyor", name: "7x_VI", location: "3002.35.1.1.4", station_type: "vi", image_profile: "7X", excel_profile: "vi"}
