@@ -21,6 +21,8 @@ build/
 *.whl
 *.exe
 *.zip
+!releases/dmc-image-tool/
+!releases/dmc-image-tool/发布包_DMC图片工具.zip
 *.7z
 *.tar
 *.gz
