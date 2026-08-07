@@ -8,7 +8,7 @@ import matplotlib
 import numpy as np
 import pandas as pd
 
-from .contour_extractor import read_image
+from .contour_extractor import build_failure_mask, image_scale_to_reference, read_image
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -78,13 +78,16 @@ def create_analysis_visualizations(products: pd.DataFrame, detections: pd.DataFr
             a_flag = cv2.IMREAD_GRAYSCALE if source_column == "a_image_path" else cv2.IMREAD_COLOR
             a_image = read_image(project_root / Path(source_path), a_flag)
             e_image = read_image(project_root / Path(product.e_image_path), cv2.IMREAD_COLOR)
+            scale_x, scale_y = image_scale_to_reference(a_image, e_image)
             marked = e_image.copy()
             for detection in detections[detections.global_order == order].itertuples(index=False):
-                cv2.rectangle(marked, (int(detection.bbox_x1), int(detection.bbox_y1)),
-                              (int(detection.bbox_x2), int(detection.bbox_y2)), (0, 255, 0), 2)
-            a_for_display = cv2.cvtColor(a_image, cv2.COLOR_GRAY2BGR) if a_image.ndim == 2 else a_image
-            difference = cv2.absdiff(e_image, a_for_display)
+                x1 = max(0, int(np.floor(detection.bbox_x1 / scale_x)))
+                y1 = max(0, int(np.floor(detection.bbox_y1 / scale_y)))
+                x2 = min(e_image.shape[1] - 1, int(np.ceil((detection.bbox_x2 + 1) / scale_x) - 1))
+                y2 = min(e_image.shape[0] - 1, int(np.ceil((detection.bbox_y2 + 1) / scale_y) - 1))
+                cv2.rectangle(marked, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            aoi_mask = build_failure_mask(e_image, e_image, config)
             axes[row_index, 0].imshow(cv2.cvtColor(marked, cv2.COLOR_BGR2RGB)); axes[row_index, 0].set_title(f"#{order} extracted boxes")
-            axes[row_index, 1].imshow(cv2.cvtColor(difference, cv2.COLOR_BGR2RGB)); axes[row_index, 1].set_title(f"#{order} E−V difference")
+            axes[row_index, 1].imshow(aoi_mask, cmap="gray"); axes[row_index, 1].set_title(f"#{order} red AOI mask")
             axes[row_index, 0].axis("off"); axes[row_index, 1].axis("off")
         _save_figure(fig, vis_dir / "extraction_preview.png")

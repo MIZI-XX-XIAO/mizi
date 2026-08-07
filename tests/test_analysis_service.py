@@ -102,3 +102,25 @@ def test_analysis_request_accepts_runtime_product_index(tmp_path: Path) -> None:
     loaded, _config, _root, _legacy = validate_analysis_request(request)
     assert loaded.loc[0, "camera"] == "7X"
     assert Path(loaded.loc[0, "a_image_path"]) == a_path.resolve()
+
+
+def test_downsampled_e_image_generates_visualization_preview(tmp_path: Path) -> None:
+    a_path, e_path = tmp_path / "large_a.png", tmp_path / "small_e.png"
+    a_image = np.full((1280, 1920), 70, dtype=np.uint8)
+    e_image = np.full((80, 120, 3), 150, dtype=np.uint8)
+    cv2.rectangle(e_image, (30, 20), (42, 32), (0, 0, 255), 2)
+    cv2.imencode(".png", a_image)[1].tofile(str(a_path))
+    cv2.imencode(".png", e_image)[1].tofile(str(e_path))
+    products = pd.DataFrame({
+        "global_order": [1], "order_code": ["TEST-001"], "dmc_raw": ["DMC-1"],
+        "camera": ["5S"], "a_image_path": [str(a_path)], "e_image_path": [str(e_path)],
+    })
+    products_path = tmp_path / "products.csv"
+    products.to_csv(products_path, index=False, encoding="utf-8-sig")
+
+    result = run_analysis_task(
+        AnalysisRequest(products_path, PROJECT_ROOT / "config/analysis_config.yaml", tmp_path, "缩小E图预览")
+    )
+
+    assert result.status == "complete"
+    assert (result.output_dir / "visualizations" / "extraction_preview.png").is_file()
