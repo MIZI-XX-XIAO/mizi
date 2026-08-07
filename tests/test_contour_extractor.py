@@ -32,6 +32,30 @@ def test_identical_pair_has_no_detection() -> None:
     assert extract_pair(a_image, e_image, config) == []
 
 
+def test_brightness_shift_does_not_block_red_aoi_detection() -> None:
+    config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    a_image = np.full((128, 192), 60, dtype=np.uint8)
+    e_image = np.full((128, 192, 3), 150, dtype=np.uint8)
+    cv2.rectangle(e_image, (70, 40), (92, 60), (0, 0, 255), 2)
+    detections = extract_pair(a_image, e_image, config)
+    assert len(detections) == 1
+    assert abs(detections[0]["center_x"] - 81) < 2
+    assert abs(detections[0]["center_y"] - 50) < 2
+
+
+def test_downsampled_e_aoi_is_mapped_back_to_a_coordinates() -> None:
+    config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    a_image = np.full((1280, 1920), 80, dtype=np.uint8)
+    e_image = np.full((80, 120, 3), 150, dtype=np.uint8)
+    cv2.rectangle(e_image, (30, 20), (42, 32), (0, 0, 255), 2)
+    detections = extract_pair(a_image, e_image, config)
+    assert len(detections) == 1
+    assert abs(detections[0]["center_x"] - 576) < 24
+    assert abs(detections[0]["center_y"] - 416) < 24
+    assert detections[0]["bbox_x1"] >= 0
+    assert detections[0]["bbox_x2"] < 1920
+
+
 def test_outline_crossing_tile_boundary_is_returned_once() -> None:
     config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
     config.update(tile_width=96, tile_height=64, tile_overlap=20)

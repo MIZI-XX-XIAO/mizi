@@ -20,7 +20,7 @@ from .app_runtime import (
     ALGORITHM_VERSION, APP_VERSION, configure_logging, file_fingerprint,
     new_error_id, runtime_metadata, write_json,
 )
-from .contour_extractor import EXTRACTED_COLUMNS, extract_product, read_image
+from .contour_extractor import EXTRACTED_COLUMNS, extract_product, image_scale_to_reference, read_image
 from .pattern_analyzer import OnlinePatternEngine
 
 
@@ -32,7 +32,7 @@ def load_analysis_config(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
     required = {
-        "diff_threshold", "red_min", "red_dominance", "min_component_area",
+        "red_min", "red_dominance", "min_component_area",
         "spatial_cluster_radius_norm", "minimum_repeat_occurrences", "minimum_period",
         "maximum_period", "minimum_period_precision", "minimum_period_coverage",
         "burst_minimum_length", "warning_lead_products", "output_directory",
@@ -178,8 +178,7 @@ def validate_analysis_request(request: AnalysisRequest) -> tuple[pd.DataFrame, d
     a_image, e_image = read_image(a_path, a_flag), read_image(e_path, cv2.IMREAD_COLOR)
     if a_image.dtype.name != "uint8" or e_image.dtype.name != "uint8":
         raise ValueError("A/E必须为8位图像")
-    if a_image.shape[:2] != e_image.shape[:2]:
-        raise ValueError(f"首对A/E尺寸不一致：{a_image.shape[:2]} vs {e_image.shape[:2]}")
+    image_scale_to_reference(a_image, e_image)
     return products, config, project_root, use_legacy
 
 

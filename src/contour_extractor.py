@@ -16,6 +16,23 @@ EXTRACTED_COLUMNS = [
 ]
 
 
+def image_scale_to_reference(a_image: np.ndarray, e_image: np.ndarray) -> tuple[float, float]:
+    """Return E-to-A coordinate scale after validating a shared field of view."""
+    if e_image.ndim != 3 or e_image.shape[2] != 3:
+        raise ValueError(f"E image must be BGR, got shape {e_image.shape}")
+    a_height, a_width = a_image.shape[:2]
+    e_height, e_width = e_image.shape[:2]
+    if not a_height or not a_width or not e_height or not e_width:
+        raise ValueError("A/E images must not be empty")
+    aspect_error = abs((a_width / a_height) / (e_width / e_height) - 1.0)
+    if aspect_error > 0.02:
+        raise ValueError(
+            f"A/E aspect ratios differ too much for coordinate mapping: "
+            f"{a_width}x{a_height} vs {e_width}x{e_height}"
+        )
+    return a_width / e_width, a_height / e_height
+
+
 def read_image(path: Path, flag: int = cv2.IMREAD_COLOR) -> np.ndarray:
     """从兼容Windows中文路径的文件中按指定模式读取图片。"""
     image = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), flag)
@@ -45,23 +62,14 @@ def _extract_region(a_region: np.ndarray, e_region: np.ndarray,
 
 def build_failure_mask(a_region: np.ndarray, e_region: np.ndarray,
                        config: dict[str, Any]) -> np.ndarray:
-    """构建与主提取算法完全一致的二值failure mask，供Qt调试界面复用。"""
-    if a_region.shape[:2] != e_region.shape[:2] or e_region.ndim != 3:
-        raise ValueError("A/E region sizes must match and E must be BGR")
-    if a_region.ndim == 2:
-        # A保持单通道，仅在当前小分块中计算三个E通道相对灰度A的变化。
-        difference = np.max(np.abs(e_region.astype(np.int16) - a_region[:, :, None].astype(np.int16)), axis=2)
-    elif a_region.ndim == 3 and a_region.shape[2] == 3:
-        # 兼容旧版彩色V图数据。
-        difference = cv2.absdiff(e_region, a_region).max(axis=2)
-    else:
-        raise ValueError(f"A image must be uint8 grayscale or legacy BGR, got shape {a_region.shape}")
+    """Extract E's red AOI annotation; A is retained only for API compatibility."""
+    if e_region.ndim != 3 or e_region.shape[2] != 3:
+        raise ValueError("E image must be BGR")
     red = e_region[:, :, 2].astype(np.int16)
     green = e_region[:, :, 1].astype(np.int16)
     blue = e_region[:, :, 0].astype(np.int16)
     mask = (
-        (difference >= int(config["diff_threshold"]))
-        & (red >= int(config["red_min"]))
+        (red >= int(config["red_min"]))
         & (red - green >= int(config["red_dominance"]))
         & (red - blue >= int(config["red_dominance"]))
     ).astype(np.uint8) * 255
@@ -76,14 +84,16 @@ def extract_pair(a_image: np.ndarray, e_image: np.ndarray, config: dict[str, Any
     """以重叠分块方式提取一对A/E图中的AOI轮廓，并返回全图坐标。"""
     if a_image.dtype != np.uint8 or e_image.dtype != np.uint8:
         raise ValueError("A/E images must be 8-bit uint8")
-    if e_image.ndim != 3 or e_image.shape[2] != 3:
-        raise ValueError(f"E image must be BGR, got shape {e_image.shape}")
+    scale_x, scale_y = image_scale_to_reference(a_image, e_image)
+    image_height, image_width = e_image.shape[:2]
+    detection_config = dict(config)
     if a_image.shape[:2] != e_image.shape[:2]:
-        raise ValueError(f"A/E image sizes differ: {a_image.shape[:2]} vs {e_image.shape[:2]}")
-    image_height, image_width = a_image.shape[:2]
-    tile_width = max(1, int(config.get("tile_width", image_width)))
-    tile_height = max(1, int(config.get("tile_height", image_height)))
-    overlap = max(0, int(config.get("tile_overlap", 0)))
+        detection_config["tile_width"] = max(1, round(int(config.get("tile_width", image_width)) / scale_x))
+        detection_config["tile_height"] = max(1, round(int(config.get("tile_height", image_height)) / scale_y))
+        detection_config["tile_overlap"] = max(0, round(int(config.get("tile_overlap", 0)) / min(scale_x, scale_y)))
+    tile_width = max(1, int(detection_config.get("tile_width", image_width)))
+    tile_height = max(1, int(detection_config.get("tile_height", image_height)))
+    overlap = max(0, int(detection_config.get("tile_overlap", 0)))
     detections: list[dict[str, Any]] = []
     for core_y1 in range(0, image_height, tile_height):
         core_y2 = min(core_y1 + tile_height, image_height)
@@ -91,22 +101,22 @@ def extract_pair(a_image: np.ndarray, e_image: np.ndarray, config: dict[str, Any
             core_x2 = min(core_x1 + tile_width, image_width)
             read_x1, read_y1 = max(0, core_x1 - overlap), max(0, core_y1 - overlap)
             read_x2, read_y2 = min(image_width, core_x2 + overlap), min(image_height, core_y2 + overlap)
-            a_region = a_image[read_y1:read_y2, read_x1:read_x2]
             e_region = e_image[read_y1:read_y2, read_x1:read_x2]
-            for local in _extract_region(a_region, e_region, config):
+            for local in _extract_region(e_region, e_region, detection_config):
                 global_x = float(local["center_x"]) + read_x1
                 global_y = float(local["center_y"]) + read_y1
                 # 每个质心仅由其所在核心分块接收，重叠区域不会产生重复结果。
                 if not (core_x1 <= global_x < core_x2 and core_y1 <= global_y < core_y2):
                     continue
                 local.update({
-                    "center_x": round(global_x, 3), "center_y": round(global_y, 3),
-                    "center_x_norm": round(global_x / image_width, 7),
-                    "center_y_norm": round(global_y / image_height, 7),
-                    "bbox_x1": int(local["bbox_x1"]) + read_x1,
-                    "bbox_y1": int(local["bbox_y1"]) + read_y1,
-                    "bbox_x2": int(local["bbox_x2"]) + read_x1,
-                    "bbox_y2": int(local["bbox_y2"]) + read_y1,
+                    "center_x": round((global_x + 0.5) * scale_x - 0.5, 3),
+                    "center_y": round((global_y + 0.5) * scale_y - 0.5, 3),
+                    "center_x_norm": round(((global_x + 0.5) * scale_x) / a_image.shape[1], 7),
+                    "center_y_norm": round(((global_y + 0.5) * scale_y) / a_image.shape[0], 7),
+                    "bbox_x1": int(np.floor((int(local["bbox_x1"]) + read_x1) * scale_x)),
+                    "bbox_y1": int(np.floor((int(local["bbox_y1"]) + read_y1) * scale_y)),
+                    "bbox_x2": min(a_image.shape[1] - 1, int(np.ceil((int(local["bbox_x2"]) + read_x1 + 1) * scale_x) - 1)),
+                    "bbox_y2": min(a_image.shape[0] - 1, int(np.ceil((int(local["bbox_y2"]) + read_y1 + 1) * scale_y) - 1)),
                 })
                 detections.append(local)
     return sorted(detections, key=lambda item: (item["center_y"], item["center_x"]))

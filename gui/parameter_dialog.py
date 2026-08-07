@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 
 
 INTEGER_FIELDS = {
-    "diff_threshold": (0, 255), "red_min": (0, 255), "red_dominance": (0, 255),
+    "red_min": (0, 255), "red_dominance": (0, 255),
     "min_component_area": (1, 10_000_000), "max_component_area": (1, 100_000_000),
     "minimum_repeat_occurrences": (2, 10_000), "minimum_period": (1, 1_000_000),
     "maximum_period": (1, 1_000_000), "burst_minimum_length": (2, 100_000),
@@ -29,7 +29,6 @@ FLOAT_FIELDS = {
 }
 
 FIELD_INFO = {
-    "diff_threshold": ("灰度差异阈值", "像素", "A/E图灰度差超过该值时进入候选区域。", "basic"),
     "red_min": ("红色最小值", "", "E图红色通道的最低阈值。", "basic"),
     "red_dominance": ("红色优势值", "", "红色通道相对其他通道的最小优势。", "basic"),
     "min_component_area": ("最小缺陷面积", "px²", "过滤面积过小的噪点。", "basic"),

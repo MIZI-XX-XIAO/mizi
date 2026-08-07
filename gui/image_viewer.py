@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
-from src.contour_extractor import build_failure_mask, read_image
+from src.contour_extractor import build_failure_mask, image_scale_to_reference, read_image
 
 
 def _pixmap(image: np.ndarray) -> QPixmap:
@@ -96,8 +96,7 @@ class _ImageLoadTask(QRunnable):
             a_flag = cv2.IMREAD_GRAYSCALE if source_column == "a_image_path" else cv2.IMREAD_COLOR
             a_full = read_image(Path(self.product[source_column]), a_flag)
             e_full = read_image(Path(self.product.e_image_path), cv2.IMREAD_COLOR)
-            if a_full.shape[:2] != e_full.shape[:2]:
-                raise ValueError(f"A/E尺寸不一致：{a_full.shape[:2]} vs {e_full.shape[:2]}")
+            scale_x, scale_y = image_scale_to_reference(a_full, e_full)
             height, width = a_full.shape[:2]
             if self.original_region:
                 center_x = int(self.rows.center_x.iloc[0]) if not self.rows.empty else width // 2
@@ -106,7 +105,8 @@ class _ImageLoadTask(QRunnable):
                 x2, y2 = min(width, x1 + 1024), min(height, y1 + 1024)
                 x1, y1 = max(0, x2 - 1024), max(0, y2 - 1024)
                 a_image = a_full[y1:y2, x1:x2].copy()
-                e_image = e_full[y1:y2, x1:x2].copy()
+                e_aligned = cv2.resize(e_full, (width, height), interpolation=cv2.INTER_LINEAR)
+                e_image = e_aligned[y1:y2, x1:x2].copy()
                 boxes = [
                     (row.bbox_x1 - x1, row.bbox_y1 - y1, row.bbox_x2 - x1, row.bbox_y2 - y1)
                     for row in self.rows.itertuples(index=False)
@@ -115,16 +115,14 @@ class _ImageLoadTask(QRunnable):
                 ]
                 region_text = f"原图区域 x={x1}:{x2}, y={y1}:{y2}"
             else:
-                scale = min(1.0, 2560 / width, 1440 / height)
-                size = (max(1, round(width * scale)), max(1, round(height * scale)))
-                a_image = cv2.resize(a_full, size, interpolation=cv2.INTER_AREA)
-                e_image = cv2.resize(e_full, size, interpolation=cv2.INTER_AREA)
+                a_image = cv2.resize(a_full, (e_full.shape[1], e_full.shape[0]), interpolation=cv2.INTER_AREA)
+                e_image = e_full.copy()
                 boxes = [
-                    (row.bbox_x1 * scale, row.bbox_y1 * scale,
-                     row.bbox_x2 * scale, row.bbox_y2 * scale)
+                    (row.bbox_x1 / scale_x, row.bbox_y1 / scale_y,
+                     row.bbox_x2 / scale_x, row.bbox_y2 / scale_y)
                     for row in self.rows.itertuples(index=False)
                 ]
-                region_text = f"预览缩放 {scale:.2f}"
+                region_text = f"E图检测尺度 {e_full.shape[1]}×{e_full.shape[0]}"
             del a_full, e_full
             a_bgr = cv2.cvtColor(a_image, cv2.COLOR_GRAY2BGR) if a_image.ndim == 2 else a_image
             payload = {
