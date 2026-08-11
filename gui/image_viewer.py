@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
-from src.contour_extractor import build_failure_mask, image_scale_to_reference, read_image
+from src.contour_extractor import build_failure_mask, detection_profile, image_scale_to_reference, read_image
 
 
 def _pixmap(image: np.ndarray) -> QPixmap:
@@ -93,10 +93,12 @@ class _ImageLoadTask(QRunnable):
     def run(self) -> None:
         try:
             source_column = "a_image_path" if "a_image_path" in self.product else "v_image_path"
+            profile = detection_profile(self.config, str(self.product.get("camera", "")))
             a_flag = cv2.IMREAD_GRAYSCALE if source_column == "a_image_path" else cv2.IMREAD_COLOR
             a_full = read_image(Path(self.product[source_column]), a_flag)
             e_full = read_image(Path(self.product.e_image_path), cv2.IMREAD_COLOR)
             scale_x, scale_y = image_scale_to_reference(a_full, e_full)
+            mask_full = build_failure_mask(e_full, e_full, profile)
             height, width = a_full.shape[:2]
             if self.original_region:
                 center_x = int(self.rows.center_x.iloc[0]) if not self.rows.empty else width // 2
@@ -107,6 +109,8 @@ class _ImageLoadTask(QRunnable):
                 a_image = a_full[y1:y2, x1:x2].copy()
                 e_aligned = cv2.resize(e_full, (width, height), interpolation=cv2.INTER_LINEAR)
                 e_image = e_aligned[y1:y2, x1:x2].copy()
+                mask_aligned = cv2.resize(mask_full, (width, height), interpolation=cv2.INTER_NEAREST)
+                mask_image = mask_aligned[y1:y2, x1:x2].copy()
                 boxes = [
                     (row.bbox_x1 - x1, row.bbox_y1 - y1, row.bbox_x2 - x1, row.bbox_y2 - y1)
                     for row in self.rows.itertuples(index=False)
@@ -117,6 +121,7 @@ class _ImageLoadTask(QRunnable):
             else:
                 a_image = cv2.resize(a_full, (e_full.shape[1], e_full.shape[0]), interpolation=cv2.INTER_AREA)
                 e_image = e_full.copy()
+                mask_image = mask_full
                 boxes = [
                     (row.bbox_x1 / scale_x, row.bbox_y1 / scale_y,
                      row.bbox_x2 / scale_x, row.bbox_y2 / scale_y)
@@ -128,7 +133,7 @@ class _ImageLoadTask(QRunnable):
             payload = {
                 "a": a_image, "e": e_image,
                 "diff": cv2.absdiff(e_image, a_bgr),
-                "mask": build_failure_mask(a_image, e_image, self.config),
+                "mask": mask_image,
                 "boxes": boxes, "region_text": region_text,
             }
             self.signals.loaded.emit(self.request_id, payload)
@@ -308,7 +313,7 @@ class ImageReviewWidget(QWidget):
         rows = self.detections[self.detections.global_order == self.current_order]
         areas = ",".join(str(int(value)) for value in rows.component_area.tolist()) if not rows.empty else "无"
         self.info.setText(
-            f"#{self.current_order}　检测框：{len(rows)}　面积：{areas}　{payload['region_text']}"
+            f"#{self.current_order}　检测框：{len(rows)}　E图面积：{areas}　{payload['region_text']}"
         )
 
     def _load_failed(self, request_id: int, message: str) -> None:
@@ -385,11 +390,16 @@ class ImageReviewWidget(QWidget):
             f"<b>缺陷数量：</b>{len(rows)}",
         ]
         for index, row in enumerate(rows.itertuples(index=False), 1):
+            type_name = {
+                "micro": "微小缺陷", "local": "局部缺陷", "region_anomaly": "区域异常",
+            }.get(getattr(row, "detection_type", "local"), "局部缺陷")
+            cluster_id = getattr(row, "cluster_id", "") or "—"
             lines.append(
                 f"<br><b>缺陷 {index}</b><br>"
+                f"类型：{type_name}<br>"
                 f"位置：({row.center_x:.1f}, {row.center_y:.1f})<br>"
-                f"面积：{int(row.component_area)} px²<br>"
-                f"空间簇：{getattr(row, 'cluster_id', '-')}"
+                f"E图检测面积：{int(row.component_area)} px²<br>"
+                f"空间簇：{cluster_id}"
             )
         if not self.process_data.empty and "global_order" in self.process_data:
             matches = self.process_data[self.process_data.global_order == self.current_order]

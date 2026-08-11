@@ -12,6 +12,7 @@ from PySide6.QtCore import QSize  # noqa: E402
 from PySide6.QtWidgets import QLabel  # noqa: E402
 
 from gui.main_window import MainWindow  # noqa: E402
+from gui.parameter_dialog import ParameterDialog  # noqa: E402
 from gui.workbench import LayoutProfile, WorkbenchStack, resolve_layout_profile  # noqa: E402
 
 
@@ -30,6 +31,22 @@ def test_main_window_starts(qtbot) -> None:
     assert window.minimumWidth() <= 980
     window.close()
     window.deleteLater()
+
+
+def test_parameter_dialog_keeps_independent_detection_profiles(qtbot) -> None:
+    project = Path(__file__).resolve().parents[1]
+    import yaml
+    config = yaml.safe_load((project / "config/analysis_config.yaml").read_text(encoding="utf-8"))
+    dialog = ParameterDialog(config, project / "config/analysis_config.yaml")
+    qtbot.addWidget(dialog)
+    dialog.editors["red_min"].setValue(111)
+    dialog.profile_combo.setCurrentText("5X")
+    dialog.editors["red_min"].setValue(222)
+    values = dialog.values()
+    assert values["detection_profiles"]["5S"]["red_min"] == 111
+    assert values["detection_profiles"]["5X"]["red_min"] == 222
+    assert values["detection_profiles"]["7S"]["red_min"] == 150
+    dialog.close()
 
 
 def test_workbench_navigation_and_responsive_layout(qtbot) -> None:

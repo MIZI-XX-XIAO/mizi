@@ -8,7 +8,7 @@ import matplotlib
 import numpy as np
 import pandas as pd
 
-from .contour_extractor import build_failure_mask, image_scale_to_reference, read_image
+from .contour_extractor import build_failure_mask, detection_profile, image_scale_to_reference, read_image
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -25,9 +25,10 @@ def create_analysis_visualizations(products: pd.DataFrame, detections: pd.DataFr
     vis_dir.mkdir(parents=True, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(9, 5.5))
-    if not detections.empty:
-        for cluster_id, group in detections.groupby("cluster_id"):
-            repeated = int((detections["cluster_id"] == cluster_id).sum()) >= int(config["minimum_repeat_occurrences"])
+    clustered = detections[detections.cluster_id.astype(str) != ""] if not detections.empty else detections
+    if not clustered.empty:
+        for cluster_id, group in clustered.groupby("cluster_id"):
+            repeated = int((clustered["cluster_id"] == cluster_id).sum()) >= int(config["minimum_repeat_occurrences"])
             ax.scatter(group.center_x_norm, group.center_y_norm, s=42 if repeated else 22,
                        alpha=0.85 if repeated else 0.45, label=cluster_id if repeated else None)
     ax.invert_yaxis(); ax.set_xlim(0, 1); ax.set_ylim(1, 0)
@@ -36,10 +37,10 @@ def create_analysis_visualizations(products: pd.DataFrame, detections: pd.DataFr
     _save_figure(fig, vis_dir / "detected_spatial_clusters.png")
 
     fig, ax = plt.subplots(figsize=(12, 4.5))
-    if not detections.empty:
-        cluster_order = {cluster_id: index + 1 for index, cluster_id in enumerate(sorted(detections.cluster_id.unique()))}
-        y = detections.cluster_id.map(cluster_order)
-        ax.scatter(detections.global_order, y, c=y, cmap="tab20", s=28)
+    if not clustered.empty:
+        cluster_order = {cluster_id: index + 1 for index, cluster_id in enumerate(sorted(clustered.cluster_id.unique()))}
+        y = clustered.cluster_id.map(cluster_order)
+        ax.scatter(clustered.global_order, y, c=y, cmap="tab20", s=28)
         ax.set_yticks(list(cluster_order.values()), list(cluster_order.keys()))
     ax.set_xlabel("global_order"); ax.set_ylabel("spatial cluster"); ax.set_title("Detected defects over product order")
     _save_figure(fig, vis_dir / "cluster_timeline.png")
@@ -86,7 +87,8 @@ def create_analysis_visualizations(products: pd.DataFrame, detections: pd.DataFr
                 x2 = min(e_image.shape[1] - 1, int(np.ceil((detection.bbox_x2 + 1) / scale_x) - 1))
                 y2 = min(e_image.shape[0] - 1, int(np.ceil((detection.bbox_y2 + 1) / scale_y) - 1))
                 cv2.rectangle(marked, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            aoi_mask = build_failure_mask(e_image, e_image, config)
+            profile = detection_profile(config, str(product.camera))
+            aoi_mask = build_failure_mask(e_image, e_image, profile)
             axes[row_index, 0].imshow(cv2.cvtColor(marked, cv2.COLOR_BGR2RGB)); axes[row_index, 0].set_title(f"#{order} extracted boxes")
             axes[row_index, 1].imshow(aoi_mask, cmap="gray"); axes[row_index, 1].set_title(f"#{order} red AOI mask")
             axes[row_index, 0].axis("off"); axes[row_index, 1].axis("off")

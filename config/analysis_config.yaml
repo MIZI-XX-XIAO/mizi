@@ -1,12 +1,17 @@
 # 本文件集中配置缺陷轮廓提取、空间聚类、周期发现和预警算法的全部关键参数。
-red_min: 150
-red_dominance: 40
-morph_kernel_size: 3
-min_component_area: 8
-max_component_area: 5000
-tile_width: 2048
-tile_height: 1024
-tile_overlap: 64
+detection_profiles:
+  5S: &default_detection
+    red_min: 150
+    red_dominance: 40
+    morph_kernel_size: 3
+    min_component_area: 1
+    max_component_area: 5000
+    micro_max_component_area: 7
+    region_min_width_ratio: 0.4
+    region_min_height_ratio: 0.4
+  5X: *default_detection
+  7S: *default_detection
+  7X: *default_detection
 
 spatial_cluster_radius_norm: 0.03
 minimum_repeat_occurrences: 4

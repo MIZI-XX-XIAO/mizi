@@ -14,10 +14,15 @@ def analyze_defect_relationships(
     transition_columns = ["前一缺陷", "后一缺陷", "转移次数", "条件概率", "平均间隔片数"]
     if defects.empty:
         return pd.DataFrame(columns=columns), pd.DataFrame(columns=transition_columns)
+    if "detection_type" in defects:
+        defects = defects[defects["detection_type"] != "region_anomaly"]
+        if defects.empty:
+            return pd.DataFrame(columns=columns), pd.DataFrame(columns=transition_columns)
     category = "defect_type" if "defect_type" in defects else "cluster_id"
     if category not in defects or defects[category].dropna().empty:
         return pd.DataFrame(columns=columns), pd.DataFrame(columns=transition_columns)
     events = defects.dropna(subset=[category]).copy()
+    events = events[events[category].astype(str).str.strip() != ""]
     events[category] = events[category].astype(str)
     by_order = {
         int(order): sorted(set(group[category]))

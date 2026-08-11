@@ -44,3 +44,19 @@ def test_online_replay_discovers_period_burst_and_warnings() -> None:
     assert 374 in alerts.loc[alerts.alert_type == "expected_occurrence_missing", "alert_at_order"].tolist()
     assert len(assigned) == len(rows)
     assert len(clusters[clusters.product_count >= 4]) == 2
+
+
+def test_region_anomaly_is_kept_but_not_clustered() -> None:
+    products = pd.DataFrame({"global_order": [1, 2]})
+    detections = pd.DataFrame([
+        {"detected_id": "X0001", "global_order": 1, "center_x_norm": 0.5,
+         "center_y_norm": 0.5, "detection_type": "region_anomaly", "cluster_id": ""},
+        {"detected_id": "X0002", "global_order": 2, "center_x_norm": 0.2,
+         "center_y_norm": 0.2, "detection_type": "micro", "cluster_id": ""},
+    ])
+    assigned, clusters, patterns, alerts = OnlinePatternEngine(_config()).process(products, detections)
+    assert len(assigned) == 2
+    assert assigned.loc[assigned.detected_id == "X0001", "cluster_id"].iloc[0] == ""
+    assert assigned.loc[assigned.detected_id == "X0002", "cluster_id"].iloc[0] == "C001"
+    assert len(clusters) == 1
+    assert patterns.empty and alerts.empty

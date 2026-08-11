@@ -269,6 +269,8 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         items = (
             ("analyzed_product_count", "产品总数"), ("extracted_defect_count", "提取缺陷"),
+            ("micro_defect_count", "微小缺陷"), ("local_defect_count", "局部缺陷"),
+            ("region_anomaly_count", "区域异常"),
             ("spatial_cluster_count", "空间簇"), ("discovered_pattern_count", "发现规律"),
             ("periodic_pattern_count", "周期规律"), ("burst_pattern_count", "连续异常"),
             ("alert_count", "告警数量"), ("elapsed_seconds", "耗时（秒）"),
@@ -755,7 +757,8 @@ class MainWindow(QMainWindow):
         self.defect_filter.addItem("全部缺陷类别")
         category = next((name for name in ("defect_type", "cluster_id") if name in defects), None)
         if category:
-            self.defect_filter.addItems(sorted(defects[category].dropna().astype(str).unique()))
+            values = defects[category].dropna().astype(str)
+            self.defect_filter.addItems(sorted(values[values.str.strip() != ""].unique()))
         minimum, maximum = int(products.global_order.min()), int(products.global_order.max())
         self.order_start.setRange(minimum, maximum)
         self.order_end.setRange(minimum, maximum)

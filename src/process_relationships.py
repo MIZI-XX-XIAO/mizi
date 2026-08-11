@@ -132,6 +132,8 @@ def analyze_process_relationships(
     parameters: pd.DataFrame,
     tolerance_seconds: int = 60,
 ) -> ProcessRelationshipResult:
+    if "detection_type" in defects:
+        defects = defects[defects["detection_type"] != "region_anomaly"].copy()
     product_report = validate_products(products)
     parameter_report = validate_process_parameters(parameters)
     if not product_report.is_valid:

@@ -111,9 +111,13 @@ class OnlinePatternEngine:
     def process(self, products: pd.DataFrame, detections: pd.DataFrame,
                 progress_callback: Callable[[int, int, int], None] | None = None,
                 cancel_check: Callable[[], bool] | None = None
-                ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         assigned = detections.copy()
-        by_order = {int(order): group for order, group in assigned.groupby("global_order")}
+        analyzable = (
+            assigned[assigned["detection_type"] != "region_anomaly"]
+            if "detection_type" in assigned else assigned
+        )
+        by_order = {int(order): group for order, group in analyzable.groupby("global_order")}
         index_lookup = {str(row.detected_id): index for index, row in assigned.iterrows()}
         lead = int(self.config["warning_lead_products"])
         miss_tolerance = int(self.config["missing_order_tolerance"])

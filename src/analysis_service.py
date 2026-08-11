@@ -20,7 +20,10 @@ from .app_runtime import (
     ALGORITHM_VERSION, APP_VERSION, configure_logging, file_fingerprint,
     new_error_id, runtime_metadata, write_json,
 )
-from .contour_extractor import EXTRACTED_COLUMNS, extract_product, image_scale_to_reference, read_image
+from .contour_extractor import (
+    DETECTION_KEYS, DETECTION_PROFILE_NAMES, EXTRACTED_COLUMNS, extract_product,
+    image_scale_to_reference, normalize_analysis_config, read_image,
+)
 from .pattern_analyzer import OnlinePatternEngine
 
 
@@ -30,15 +33,17 @@ STAGES = ("VALIDATING", "EXTRACTING", "ANALYZING", "WRITING", "VISUALIZING", "CO
 def load_analysis_config(path: Path) -> dict[str, Any]:
     """加载并校验生产缺陷分析所需的YAML参数。"""
     with path.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle) or {}
+        config = normalize_analysis_config(yaml.safe_load(handle) or {})
     required = {
-        "red_min", "red_dominance", "min_component_area",
         "spatial_cluster_radius_norm", "minimum_repeat_occurrences", "minimum_period",
         "maximum_period", "minimum_period_precision", "minimum_period_coverage",
         "burst_minimum_length", "warning_lead_products", "output_directory",
     }
     if missing := required - set(config):
         raise ValueError(f"分析配置缺少字段：{sorted(missing)}")
+    for name in DETECTION_PROFILE_NAMES:
+        if missing := set(DETECTION_KEYS) - set(config["detection_profiles"][name]):
+            raise ValueError(f"检测配置 {name} 缺少字段：{sorted(missing)}")
     return config
 
 
@@ -132,7 +137,10 @@ def validate_analysis_request(request: AnalysisRequest) -> tuple[pd.DataFrame, d
     if not request.output_parent.exists() or not request.output_parent.is_dir():
         raise FileNotFoundError(f"输出父目录不存在：{request.output_parent}")
     _safe_task_name(request.task_name)
-    config = dict(request.config_snapshot) if request.config_snapshot is not None else load_analysis_config(config_path)
+    config = (
+        normalize_analysis_config(dict(request.config_snapshot))
+        if request.config_snapshot is not None else load_analysis_config(config_path)
+    )
     products = (
         request.products_frame.copy()
         if request.products_frame is not None
@@ -283,6 +291,9 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
         summary = {
             "task_name": request.task_name, "status": "complete", "analyzed_product_count": total,
             "extracted_defect_count": len(assigned), "products_with_extracted_defects": int(assigned.global_order.nunique()),
+            "micro_defect_count": int((assigned.detection_type == "micro").sum()),
+            "local_defect_count": int((assigned.detection_type == "local").sum()),
+            "region_anomaly_count": int((assigned.detection_type == "region_anomaly").sum()),
             "spatial_cluster_count": len(clusters), "discovered_pattern_count": len(patterns),
             "periodic_pattern_count": int((patterns.pattern_type == "periodic").sum()) if not patterns.empty else 0,
             "burst_pattern_count": int((patterns.pattern_type == "burst").sum()) if not patterns.empty else 0,

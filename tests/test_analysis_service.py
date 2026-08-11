@@ -124,3 +124,7 @@ def test_downsampled_e_image_generates_visualization_preview(tmp_path: Path) -> 
 
     assert result.status == "complete"
     assert (result.output_dir / "visualizations" / "extraction_preview.png").is_file()
+    assert result.summary["local_defect_count"] == 1
+    assert result.summary["micro_defect_count"] == 0
+    assert result.summary["region_anomaly_count"] == 0
+    assert "detection_type" in result.frames["extracted"]
