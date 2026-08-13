@@ -59,6 +59,9 @@ class AnalysisRequest:
     source_files: tuple[Path, ...] = ()
     source_index_frame: pd.DataFrame | None = None
     source_issues_frame: pd.DataFrame | None = None
+    analysis_mode: str = "single_aoi"
+    enabled_scopes: tuple[str, ...] = ()
+    image_roots: dict[str, Path] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -158,6 +161,10 @@ def validate_analysis_request(request: AnalysisRequest) -> tuple[pd.DataFrame, d
     unknown_cameras = set(products["camera"].astype(str)) - supported_cameras
     if unknown_cameras:
         raise ValueError(f"存在未配置的图片产品族：{sorted(unknown_cameras)}")
+    if "analysis_scope" not in products:
+        products["analysis_scope"] = products["camera"].astype(str).str.upper()
+    if "scope_order" not in products:
+        products["scope_order"] = products.groupby("analysis_scope").cumcount() + 1
     project_root = config_path.parent.parent
     source_column = "v_image_path" if use_legacy else "a_image_path"
     products = products.copy()
@@ -270,16 +277,69 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
         extracted = pd.DataFrame(extracted_records, columns=EXTRACTED_COLUMNS)
 
         callbacks.on_stage("ANALYZING")
-        engine = OnlinePatternEngine(config, alert_callback=callbacks.on_alert)
+        assigned_parts: list[pd.DataFrame] = []
+        cluster_parts: list[pd.DataFrame] = []
+        pattern_parts: list[pd.DataFrame] = []
+        alert_parts: list[pd.DataFrame] = []
+        analyzed_count = 0
+        scopes = products["analysis_scope"].drop_duplicates().astype(str).tolist()
+        for scope in scopes:
+            scope_products = products[products["analysis_scope"].astype(str).eq(scope)].copy()
+            order_to_global = dict(zip(scope_products["scope_order"].astype(int), scope_products["global_order"].astype(int)))
+            global_to_scope = {value: key for key, value in order_to_global.items()}
+            engine_products = scope_products.copy()
+            engine_products["global_order"] = engine_products["scope_order"].astype(int)
+            scope_detections = extracted[extracted["global_order"].isin(global_to_scope)].copy()
+            scope_detections["global_order"] = scope_detections["global_order"].map(global_to_scope)
 
-        def analysis_progress(order: int, processed: int, analysis_total: int) -> None:
-            callbacks.on_progress(ProgressEvent("ANALYZING", order, processed, analysis_total,
-                                                70 + round(processed / analysis_total * 15), len(extracted)))
+            def scoped_alert(alert: dict[str, Any], scope_name: str = scope) -> None:
+                item = dict(alert)
+                item["analysis_scope"] = scope_name
+                item["alert_id"] = f"{scope_name}-{item['alert_id']}"
+                item["cluster_id"] = f"{scope_name}-{item['cluster_id']}"
+                callbacks.on_alert(item)
 
-        assigned, clusters, patterns, alerts = engine.process(
-            products, extracted, progress_callback=analysis_progress,
-            cancel_check=lambda: token.is_cancelled,
-        )
+            engine = OnlinePatternEngine(config, alert_callback=scoped_alert)
+
+            def analysis_progress(order: int, processed: int, analysis_total: int) -> None:
+                completed = analyzed_count + processed
+                callbacks.on_progress(ProgressEvent(
+                    "ANALYZING", order_to_global.get(order), completed, total,
+                    70 + round(completed / total * 15), len(extracted),
+                ))
+
+            scope_assigned, scope_clusters, scope_patterns, scope_alerts = engine.process(
+                engine_products, scope_detections, progress_callback=analysis_progress,
+                cancel_check=lambda: token.is_cancelled,
+            )
+            analyzed_count += len(scope_products)
+            scope_assigned["global_order"] = scope_assigned["global_order"].map(order_to_global)
+            scope_assigned["analysis_scope"] = scope
+            if "cluster_id" in scope_assigned:
+                mask = scope_assigned["cluster_id"].astype(str).str.strip().ne("")
+                scope_assigned.loc[mask, "cluster_id"] = scope + "-" + scope_assigned.loc[mask, "cluster_id"].astype(str)
+            for frame in (scope_clusters, scope_patterns, scope_alerts):
+                frame["analysis_scope"] = scope
+                if not frame.empty and "cluster_id" in frame:
+                    frame["cluster_id"] = scope + "-" + frame["cluster_id"].astype(str)
+            if not scope_patterns.empty:
+                scope_patterns["pattern_id"] = scope + "-" + scope_patterns["pattern_id"].astype(str)
+                for column in ("first_order", "last_order", "confirmed_at_order", "next_expected_order"):
+                    if column in scope_patterns:
+                        scope_patterns[column] = scope_patterns[column].map(order_to_global)
+            if not scope_alerts.empty:
+                scope_alerts["alert_id"] = scope + "-" + scope_alerts["alert_id"].astype(str)
+                for column in ("alert_at_order", "predicted_order"):
+                    if column in scope_alerts:
+                        scope_alerts[column] = scope_alerts[column].map(order_to_global)
+            assigned_parts.append(scope_assigned)
+            cluster_parts.append(scope_clusters)
+            pattern_parts.append(scope_patterns)
+            alert_parts.append(scope_alerts)
+        assigned = pd.concat(assigned_parts, ignore_index=True) if assigned_parts else pd.DataFrame(columns=EXTRACTED_COLUMNS)
+        clusters = pd.concat(cluster_parts, ignore_index=True) if cluster_parts else pd.DataFrame()
+        patterns = pd.concat(pattern_parts, ignore_index=True) if pattern_parts else pd.DataFrame()
+        alerts = pd.concat(alert_parts, ignore_index=True) if alert_parts else pd.DataFrame()
         if token.is_cancelled:
             raise InterruptedError("用户取消")
         callbacks.on_stage("WRITING")
@@ -288,6 +348,22 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
         clusters.to_csv(work_dir / "spatial_clusters.csv", index=False, encoding="utf-8-sig")
         patterns.to_csv(work_dir / "discovered_patterns.csv", index=False, encoding="utf-8-sig")
         alerts.to_csv(work_dir / "alerts.csv", index=False, encoding="utf-8-sig")
+        scopes_root = work_dir / "scopes"
+        for scope in scopes:
+            scope_dir = scopes_root / scope
+            scope_dir.mkdir(parents=True, exist_ok=True)
+            products[products["analysis_scope"].astype(str).eq(scope)].to_csv(
+                scope_dir / "products.csv", index=False, encoding="utf-8-sig"
+            )
+            for filename, frame in (
+                ("extracted_defects.csv", assigned), ("spatial_clusters.csv", clusters),
+                ("discovered_patterns.csv", patterns), ("alerts.csv", alerts),
+            ):
+                scoped = (
+                    frame[frame["analysis_scope"].astype(str).eq(scope)]
+                    if not frame.empty and "analysis_scope" in frame else frame.iloc[0:0]
+                )
+                scoped.to_csv(scope_dir / filename, index=False, encoding="utf-8-sig")
         summary = {
             "task_name": request.task_name, "status": "complete", "analyzed_product_count": total,
             "extracted_defect_count": len(assigned), "products_with_extracted_defects": int(assigned.global_order.nunique()),
@@ -300,6 +376,16 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
             "alert_count": len(alerts), "elapsed_seconds": round(perf_counter() - started, 3),
             "truth_labels_used": False, "application_version": APP_VERSION,
             "algorithm_version": ALGORITHM_VERSION,
+            "analysis_mode": request.analysis_mode,
+            "enabled_scopes": scopes,
+            "scope_summary": {
+                scope: {
+                    "product_count": int(products["analysis_scope"].astype(str).eq(scope).sum()),
+                    "defect_count": int(assigned["analysis_scope"].astype(str).eq(scope).sum()),
+                    "pattern_count": int(patterns["analysis_scope"].astype(str).eq(scope).sum()) if not patterns.empty else 0,
+                    "alert_count": int(alerts["analysis_scope"].astype(str).eq(scope).sum()) if not alerts.empty else 0,
+                } for scope in scopes
+            },
         }
         (work_dir / "analysis_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -320,6 +406,16 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
             ))
         )
         create_analysis_visualizations(display_products, assigned, clusters, patterns, alerts, Path("."), work_dir, config)
+        for scope in scopes:
+            scope_products = display_products[display_products["analysis_scope"].astype(str).eq(scope)]
+            scope_assigned = assigned[assigned["analysis_scope"].astype(str).eq(scope)]
+            scope_clusters = clusters[clusters["analysis_scope"].astype(str).eq(scope)] if not clusters.empty else clusters
+            scope_patterns = patterns[patterns["analysis_scope"].astype(str).eq(scope)] if not patterns.empty else patterns
+            scope_alerts = alerts[alerts["analysis_scope"].astype(str).eq(scope)] if not alerts.empty else alerts
+            create_analysis_visualizations(
+                scope_products, scope_assigned, scope_clusters, scope_patterns, scope_alerts,
+                Path("."), work_dir / "scopes" / scope, config,
+            )
         if token.is_cancelled:
             raise InterruptedError("用户取消")
         status_file("complete")

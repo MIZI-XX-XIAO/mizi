@@ -38,6 +38,10 @@ from src.station_sources import (
     load_station_catalog,
     validate_selected_station,
 )
+from src.station_workbook import (
+    StationWorkbookData, enrich_products_with_station_truth, load_station_workbook,
+    process_parameter_frame,
+)
 
 
 class MainWindow(QMainWindow):
@@ -62,6 +66,7 @@ class MainWindow(QMainWindow):
         self.loaded_products = pd.DataFrame()
         self.analysis_products = pd.DataFrame()
         self._station_issues = pd.DataFrame()
+        self.station_workbook: StationWorkbookData | None = None
         self._auto_relationship_pending = False
         self._close_after_cancel = False
         self._analysis_started = 0.0
@@ -135,28 +140,65 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         title = QLabel("新建分析任务")
         title.setObjectName("pageTitle")
-        intro = QLabel("选择工站、Excel和/或图片目录；程序会按Ident No.自动建立产品索引。")
+        intro = QLabel("选择全流程Excel及AOI图片目录；程序会自动识别工站并按Ident No.建立产品履历。")
         intro.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(intro)
         data_group = QGroupBox("数据源")
         form = QFormLayout(data_group)
+        self.task_mode_combo = QComboBox()
+        self.task_mode_combo.addItem("全流程分析", "full_process")
+        self.task_mode_combo.addItem("单AOI分析", "single_aoi")
+        legacy_image_setting = str(self.settings.value("paths/image_root", ""))
+        saved_mode = str(self.settings.value(
+            "task/mode", "single_aoi" if legacy_image_setting else "full_process"
+        ))
+        self.task_mode_combo.setCurrentIndex(max(0, self.task_mode_combo.findData(saved_mode)))
+        form.addRow("任务模式", self.task_mode_combo)
+        self.scope_combo = QComboBox()
+        for scope in ("5S", "5X", "7S", "7X"):
+            self.scope_combo.addItem(scope, scope)
+        legacy_station = str(self.settings.value("station/id", "35_5s_aoi"))
+        legacy_scope = {
+            "35_5s_aoi": "5S", "57_5x_aoi": "5X",
+            "conveyor_7s_aoi": "7S", "conveyor_7x_aoi": "7X",
+        }.get(legacy_station, "5S")
+        self.scope_combo.setCurrentIndex(max(0, self.scope_combo.findData(str(
+            self.settings.value("task/scope", legacy_scope)
+        ))))
+        self.scope_label = QLabel("单AOI范围")
+        form.addRow(self.scope_label, self.scope_combo)
         self.station_combo = QComboBox()
         for station in self.station_catalog.stations:
             self.station_combo.addItem(station.display_name, station.id)
         saved_station = str(self.settings.value("station/id", "35_5s_aoi"))
         station_index = self.station_combo.findData(saved_station)
         self.station_combo.setCurrentIndex(station_index if station_index >= 0 else 0)
-        form.addRow("工站", self.station_combo)
+        self.station_label = QLabel("旧版工站")
+        form.addRow(self.station_label, self.station_combo)
         self.source_excel_edit, row = self._path_row(
             self._saved_path("paths/source_excel", ""), True, "Excel工作簿 (*.xlsx *.xlsm)"
         )
         self.source_excel_edit.setPlaceholderText("可选；用于工艺/质量分析并提供Ident No.")
         form.addRow("Excel工作簿（可选）", row)
-        saved_image_root = str(self.settings.value("paths/image_root", ""))
-        self.image_root_edit, row = self._path_row(saved_image_root, False)
-        self.image_root_edit.setPlaceholderText("可选；会递归扫描下载的多视图图片")
-        form.addRow("图片根目录（可选）", row)
+        self.scope_image_edits: dict[str, QLineEdit] = {}
+        self.scope_image_rows: dict[str, QWidget] = {}
+        self.scope_image_labels: dict[str, QLabel] = {}
+        for scope in ("5S", "5X", "7S", "7X"):
+            saved = str(self.settings.value(
+                f"paths/image_root_{scope.lower()}",
+                self.settings.value("paths/image_root", "") if scope == "5S" else "",
+            ))
+            edit, image_row = self._path_row(saved, False)
+            edit.setPlaceholderText(f"可选；{scope} AOI图片根目录")
+            self.scope_image_edits[scope] = edit
+            self.scope_image_rows[scope] = image_row
+            image_label = QLabel(f"{scope}图片目录")
+            self.scope_image_labels[scope] = image_label
+            form.addRow(image_label, image_row)
+        self.image_root_edit = self.scope_image_edits["5S"]  # legacy compatibility
+        self.task_mode_combo.currentIndexChanged.connect(self._update_task_mode_fields)
+        self.scope_combo.currentIndexChanged.connect(self._update_task_mode_fields)
         output_group = QGroupBox("任务与结果")
         form = QFormLayout(output_group)
         default_output = user_data_dir() / "analysis_tasks"
@@ -211,6 +253,28 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(page)
         self.tabs.addTab(scroll, "① 新建任务")
+        self._update_task_mode_fields()
+
+    def _update_task_mode_fields(self) -> None:
+        full = self.task_mode_combo.currentData() == "full_process"
+        self.scope_combo.setVisible(not full)
+        self.scope_label.setVisible(not full)
+        selected = str(self.scope_combo.currentData() or "5S")
+        for scope, row in self.scope_image_rows.items():
+            visible = full or scope == selected
+            row.setVisible(visible)
+            self.scope_image_labels[scope].setVisible(visible)
+        # The 18-station selector is retained only for legacy single-workbook/CSV tasks.
+        legacy = bool(self.products_edit.text().strip()) if hasattr(self, "products_edit") else False
+        self.station_combo.setVisible(legacy)
+        self.station_label.setVisible(legacy)
+
+    @staticmethod
+    def _scope_station_id(scope: str) -> str:
+        return {
+            "5S": "35_5s_aoi", "5X": "57_5x_aoi",
+            "7S": "conveyor_7s_aoi", "7X": "conveyor_7x_aoi",
+        }[scope]
 
     def _build_quality_tab(self) -> None:
         page = QWidget()
@@ -290,6 +354,8 @@ class MainWindow(QMainWindow):
             grid.addWidget(card, index // 4, index % 4)
         layout.addLayout(grid)
         filters = QGridLayout()
+        self.scope_filter = QComboBox()
+        self.scope_filter.addItem("全部范围")
         self.camera_filter = QComboBox()
         self.camera_filter.addItem("全部相机")
         self.batch_filter = QComboBox()
@@ -306,6 +372,7 @@ class MainWindow(QMainWindow):
             editor.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
             editor.setCalendarPopup(True)
             editor.setVisible(False)
+        self.scope_filter.currentTextChanged.connect(self._apply_global_filters)
         self.camera_filter.currentTextChanged.connect(self._apply_global_filters)
         self.batch_filter.currentTextChanged.connect(self._apply_global_filters)
         self.defect_filter.currentTextChanged.connect(self._apply_global_filters)
@@ -314,9 +381,10 @@ class MainWindow(QMainWindow):
         self.time_start.dateTimeChanged.connect(self._apply_global_filters)
         self.time_end.dateTimeChanged.connect(self._apply_global_filters)
         filters.addWidget(QLabel("全局筛选"), 0, 0)
-        filters.addWidget(self.camera_filter, 0, 1)
-        filters.addWidget(self.batch_filter, 0, 2)
-        filters.addWidget(self.defect_filter, 0, 3)
+        filters.addWidget(self.scope_filter, 0, 1)
+        filters.addWidget(self.camera_filter, 0, 2)
+        filters.addWidget(self.batch_filter, 0, 3)
+        filters.addWidget(self.defect_filter, 0, 4)
         filters.addWidget(QLabel("产品序号"), 1, 0)
         filters.addWidget(self.order_start, 1, 1)
         filters.addWidget(self.order_end, 1, 2)
@@ -487,69 +555,106 @@ class MainWindow(QMainWindow):
                 self.analysis_products = frame
                 self._station_issues = pd.DataFrame()
             else:
-                station = self.station_catalog.station(str(self.station_combo.currentData()))
                 excel_text = self.source_excel_edit.text().strip()
-                image_text = self.image_root_edit.text().strip()
-                if not excel_text and not image_text:
+                mode = str(self.task_mode_combo.currentData())
+                scopes = (
+                    ("5S", "5X", "7S", "7X") if mode == "full_process"
+                    else (str(self.scope_combo.currentData()),)
+                )
+                image_texts = {scope: self.scope_image_edits[scope].text().strip() for scope in scopes}
+                if not excel_text and not any(image_texts.values()):
                     raise ValueError("请至少选择Excel工作簿或图片根目录")
-                excel_dmcs: list[str] | None = None
                 excel_data = None
+                self.station_workbook = None
                 station_warnings: list[str] = []
                 if excel_text:
                     excel_path = Path(excel_text)
                     if not excel_path.is_file():
                         raise FileNotFoundError(f"Excel工作簿不存在：{excel_path}")
-                    excel_data = load_excel_workbook(excel_path)
-                    station_warnings.extend(
-                        validate_selected_station(station, excel_data.query_parameters, self.station_catalog)
-                    )
-                    if "dmc_raw" in excel_data.data:
-                        excel_dmcs = excel_data.data["dmc_raw"].dropna().astype(str).str.strip().tolist()
+                    try:
+                        station_book = load_station_workbook(excel_path, self.station_catalog)
+                    except (ValueError, KeyError):
+                        station_book = None
+                    if station_book is not None:
+                        self.station_workbook = station_book
+                        station_warnings.extend(station_book.warnings)
                     else:
-                        excel_dmcs = []
-                if image_text:
+                        station = self.station_catalog.station(self._scope_station_id(scopes[0]))
+                        excel_data = load_excel_workbook(excel_path)
+                        station_warnings.extend(
+                            validate_selected_station(station, excel_data.query_parameters, self.station_catalog)
+                        )
+                product_parts: list[pd.DataFrame] = []
+                issue_parts: list[pd.DataFrame] = []
+                scanned_count = 0
+                scope_metrics: dict[str, Any] = {}
+                for scope in scopes:
+                    station = self.station_catalog.station(self._scope_station_id(scope))
+                    selected_events = (
+                        self.station_workbook.station_events(station.id)
+                        if self.station_workbook is not None else pd.DataFrame()
+                    )
+                    excel_dmcs = (
+                        selected_events["dmc_raw"].dropna().astype(str).str.strip().tolist()
+                        if not selected_events.empty else (
+                            excel_data.data["dmc_raw"].dropna().astype(str).str.strip().tolist()
+                            if excel_data is not None and "dmc_raw" in excel_data.data else []
+                        )
+                    )
+                    image_text = image_texts[scope]
+                    if not image_text:
+                        station_warnings.append(f"未提供{scope}图片目录；保留Excel履历并跳过该范围图片分析")
+                        scope_metrics[f"{scope}图片"] = "未提供"
+                        continue
                     indexed = build_image_product_index(
                         Path(image_text), station, self.station_catalog, excel_dmcs
                     )
-                    self.loaded_products = indexed.products
-                    self._station_issues = indexed.issues
-                    scanned_count = indexed.scanned_file_count
-                else:
-                    unique_dmcs = list(dict.fromkeys(excel_dmcs or []))
-                    self.loaded_products = pd.DataFrame({
-                        "global_order": range(1, len(unique_dmcs) + 1),
-                        "dmc_raw": unique_dmcs,
-                        "order_code": unique_dmcs,
-                        "camera": station.image_profile,
-                        "station_id": station.id,
-                        "station_location": station.location,
-                        "has_excel_record": True,
-                        "has_primary_pair": False,
-                    })
-                    self._station_issues = pd.DataFrame()
-                    scanned_count = 0
+                    frame = indexed.products
+                    if self.station_workbook is not None:
+                        frame = enrich_products_with_station_truth(frame, self.station_workbook, station.id)
+                    frame["analysis_scope"] = scope
+                    frame["scope_order"] = frame["global_order"]
+                    product_parts.append(frame)
+                    issue_parts.append(indexed.issues.assign(分析范围=scope))
+                    scanned_count += indexed.scanned_file_count
+                    scope_metrics[f"{scope}扫描图片"] = indexed.scanned_file_count
+                    scope_metrics[f"{scope}有效图对"] = int(frame["has_primary_pair"].eq(True).sum())
+                    scope_metrics[f"{scope}真值匹配"] = int(frame.get("truth_match", pd.Series(dtype=str)).eq("matched").sum())
+                self.loaded_products = pd.concat(product_parts, ignore_index=True) if product_parts else pd.DataFrame()
+                if not self.loaded_products.empty:
+                    self.loaded_products["global_order"] = range(1, len(self.loaded_products) + 1)
+                self._station_issues = pd.concat(issue_parts, ignore_index=True) if issue_parts else pd.DataFrame()
                 self.analysis_products = self.loaded_products[
                     self.loaded_products.get("has_primary_pair", False).eq(True)
                 ].copy() if not self.loaded_products.empty else pd.DataFrame()
                 if not self.analysis_products.empty:
                     self.analysis_products["global_order"] = range(1, len(self.analysis_products) + 1)
-                report = DataQualityReport("工站任务", len(self.loaded_products), len(self.loaded_products.columns))
+                report = DataQualityReport("全流程任务", len(self.loaded_products), len(self.loaded_products.columns))
                 report.warnings.extend(station_warnings)
                 if excel_data is not None:
                     report.warnings.extend(excel_data.quality_report.warnings)
                     report.warnings.extend(excel_data.quality_report.errors)
+                if self.station_workbook is not None:
+                    report.metrics.update({
+                        "全工站履历事件": len(self.station_workbook.events),
+                        "工艺/检测参数值": len(self.station_workbook.parameters),
+                        "当前工站真值匹配": int(
+                            self.loaded_products.get("truth_match", pd.Series(dtype=str)).eq("matched").sum()
+                        ),
+                    })
                 error_issues = int(self._station_issues.get("级别", pd.Series(dtype=str)).eq("错误").sum())
                 report.metrics.update({
-                    "所选工站": station.display_name,
-                    "Excel Ident No.": len(set(excel_dmcs or [])),
+                    "任务模式": "全流程" if mode == "full_process" else f"单AOI {scopes[0]}",
+                    "Excel Ident No.": len(self.station_workbook.products) if self.station_workbook is not None else 0,
                     "扫描图片文件": scanned_count,
                     "建立产品索引": len(self.loaded_products),
                     "可运行主图对": len(self.analysis_products),
                     "缺图/异常项": len(self._station_issues),
+                    **scope_metrics,
                 })
                 if error_issues:
                     report.errors.append(f"发现 {error_issues} 个需人工解决的重复视图")
-                if image_text and self.analysis_products.empty:
+                if any(image_texts.values()) and self.analysis_products.empty:
                     report.warnings.append("未找到完整主图对；可继续Excel分析，不运行图片算法")
             quality_frame = report.to_frame()
             if not self._station_issues.empty:
@@ -603,7 +708,10 @@ class MainWindow(QMainWindow):
             self.use_current_excel.setEnabled(False)
             self.use_current_excel.setChecked(False)
             excel_path = Path(self.source_excel_edit.text().strip()) if self.source_excel_edit.text().strip() else None
-            if excel_path is not None and not (self.excel_page.thread and self.excel_page.thread.isRunning()):
+            if (
+                excel_path is not None and self.station_workbook is None
+                and not (self.excel_page.thread and self.excel_page.thread.isRunning())
+            ):
                 station = self.station_catalog.station(str(self.station_combo.currentData()))
                 self.excel_page.excel_profile = station.excel_profile
                 self.excel_page.workbook_edit.setText(str(excel_path))
@@ -612,8 +720,14 @@ class MainWindow(QMainWindow):
                 self.excel_page.start_analysis()
             if self.analysis_products.empty:
                 if excel_path is not None:
-                    self.statusBar().showMessage("未找到完整主图对，已启动Excel分析", 8000)
-                    self.tabs.setCurrentIndex(4)
+                    if self.station_workbook is not None:
+                        self.statusBar().showMessage(
+                            "全流程Excel已完成解析；未提供有效图片目录，本次不运行图片规律分析", 10000
+                        )
+                        self.tabs.setCurrentIndex(1)
+                    else:
+                        self.statusBar().showMessage("未找到完整主图对，已启动Excel分析", 8000)
+                        self.tabs.setCurrentIndex(4)
                     return
                 raise ValueError("没有可运行图片算法的完整主图对")
             legacy_path = Path(self.products_edit.text().strip()) if self.products_edit.text().strip() else None
@@ -626,6 +740,13 @@ class MainWindow(QMainWindow):
                 source_files=source_files,
                 source_index_frame=None if legacy_path is not None else self.loaded_products,
                 source_issues_frame=None if self._station_issues.empty else self._station_issues,
+                analysis_mode=str(self.task_mode_combo.currentData()),
+                enabled_scopes=tuple(self.analysis_products["analysis_scope"].drop_duplicates())
+                    if "analysis_scope" in self.analysis_products else (),
+                image_roots={
+                    scope: Path(edit.text().strip()) for scope, edit in self.scope_image_edits.items()
+                    if edit.text().strip()
+                },
             )
             self._auto_relationship_pending = excel_path is not None
         except Exception as exc:
@@ -702,6 +823,8 @@ class MainWindow(QMainWindow):
         cooccurrence, transitions = analyze_defect_relationships(
             result.frames["products"], result.frames["extracted"]
         )
+        self._cooccurrence_frame = cooccurrence
+        self._transition_frame = transitions
         self.cooccurrence_widget.set_frame(cooccurrence)
         self.transition_widget.set_frame(transitions)
         cooccurrence.to_csv(
@@ -710,6 +833,23 @@ class MainWindow(QMainWindow):
         transitions.to_csv(
             result.output_dir / "defect_transitions.csv", index=False, encoding="utf-8-sig"
         )
+        for scope in result.summary.get("enabled_scopes", []):
+            scope_dir = result.output_dir / "scopes" / str(scope)
+            scope_dir.mkdir(parents=True, exist_ok=True)
+            scoped_cooccurrence = (
+                cooccurrence[cooccurrence["analysis_scope"].astype(str).eq(str(scope))]
+                if "analysis_scope" in cooccurrence else cooccurrence
+            )
+            scoped_transitions = (
+                transitions[transitions["analysis_scope"].astype(str).eq(str(scope))]
+                if "analysis_scope" in transitions else transitions
+            )
+            scoped_cooccurrence.to_csv(
+                scope_dir / "defect_cooccurrence.csv", index=False, encoding="utf-8-sig"
+            )
+            scoped_transitions.to_csv(
+                scope_dir / "defect_transitions.csv", index=False, encoding="utf-8-sig"
+            )
         self._populate_filters(result.frames["products"], result.frames["extracted"])
         self._apply_global_filters()
         self.statusBar().showMessage(f"分析完成：{result.output_dir}")
@@ -720,6 +860,10 @@ class MainWindow(QMainWindow):
 
     def _maybe_auto_relationship(self) -> None:
         """统一工站任务的Excel和图片都完成后自动关联。"""
+        if self._auto_relationship_pending and self.current_result is not None and self.station_workbook is not None:
+            self._auto_relationship_pending = False
+            self._analyze_process_parameters()
+            return
         if (
             not self._auto_relationship_pending
             or self.current_result is None
@@ -739,11 +883,17 @@ class MainWindow(QMainWindow):
 
     def _populate_filters(self, products: pd.DataFrame, defects: pd.DataFrame) -> None:
         widgets = (
-            self.camera_filter, self.batch_filter, self.defect_filter,
+            self.scope_filter, self.camera_filter, self.batch_filter, self.defect_filter,
             self.order_start, self.order_end, self.time_start, self.time_end,
         )
         for widget in widgets:
             widget.blockSignals(True)
+        self.scope_filter.clear()
+        self.scope_filter.addItem("全部范围")
+        if "analysis_scope" in products:
+            self.scope_filter.addItems(
+                products["analysis_scope"].dropna().astype(str).drop_duplicates().tolist()
+            )
         self.camera_filter.clear()
         self.camera_filter.addItem("全部相机")
         if "camera" in products:
@@ -783,6 +933,9 @@ class MainWindow(QMainWindow):
             return
         frames = self.current_result.frames
         products = frames["products"].copy()
+        scope = self.scope_filter.currentText()
+        if scope and scope != "全部范围" and "analysis_scope" in products:
+            products = products[products["analysis_scope"].astype(str).eq(scope)]
         camera = self.camera_filter.currentText()
         if camera and camera != "全部相机" and "camera" in products:
             products = products[products.camera.astype(str) == camera]
@@ -818,6 +971,8 @@ class MainWindow(QMainWindow):
             orders &= set(extracted.global_order.astype(int))
             products = products[products.global_order.astype(int).isin(orders)]
         patterns = frames["patterns"]
+        if scope and scope != "全部范围" and not patterns.empty and "analysis_scope" in patterns:
+            patterns = patterns[patterns["analysis_scope"].astype(str).eq(scope)]
         if (
             selected_defect and selected_defect != "全部缺陷类别"
             and not patterns.empty and "cluster_id" in patterns
@@ -828,6 +983,8 @@ class MainWindow(QMainWindow):
                 pd.to_numeric(patterns.first_order, errors="coerce").fillna(-1).astype(int).isin(orders)
             ]
         alerts = frames["alerts"]
+        if scope and scope != "全部范围" and not alerts.empty and "analysis_scope" in alerts:
+            alerts = alerts[alerts["analysis_scope"].astype(str).eq(scope)]
         if (
             selected_defect and selected_defect != "全部缺陷类别"
             and not alerts.empty and "cluster_id" in alerts
@@ -839,7 +996,22 @@ class MainWindow(QMainWindow):
             ]
         self.pattern_widget.set_frame(patterns)
         self.alert_widget.set_frame(alerts)
+        cooccurrence = getattr(self, "_cooccurrence_frame", pd.DataFrame()).copy()
+        transitions = getattr(self, "_transition_frame", pd.DataFrame()).copy()
+        if scope and scope != "全部范围":
+            if not cooccurrence.empty and "analysis_scope" in cooccurrence:
+                cooccurrence = cooccurrence[cooccurrence["analysis_scope"].astype(str).eq(scope)]
+            if not transitions.empty and "analysis_scope" in transitions:
+                transitions = transitions[transitions["analysis_scope"].astype(str).eq(scope)]
+        self.cooccurrence_widget.set_frame(cooccurrence)
+        self.transition_widget.set_frame(transitions)
         self.review.set_data(products, extracted, self._result_config)
+        if self.station_workbook is not None:
+            self.review.set_station_history(
+                self.station_workbook.events,
+                self.station_workbook.parameters,
+                self.station_workbook.package,
+            )
 
     def _cancelled(self, result: AnalysisResult) -> None:
         self.workbench.header.set_run_state("任务已取消", "ready")
@@ -883,7 +1055,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "尚无缺陷结果", "请先完成一次缺陷分析。")
             return
         try:
-            if self.use_current_excel.isChecked():
+            if self.station_workbook is not None:
+                parameters = process_parameter_frame(self.station_workbook)
+                if parameters.empty or len(parameters.columns) == 1:
+                    raise ValueError("全工站工作簿中没有可用于关联的WP1-WP5数值工艺参数")
+            elif self.use_current_excel.isChecked():
                 if self.current_excel_result is None:
                     raise ValueError("当前没有可用的Excel分析结果")
                 parameters = excel_relationship_frame(
@@ -899,15 +1075,62 @@ class MainWindow(QMainWindow):
                     parameters = excel_relationship_frame(workbook_data)
                 else:
                     parameters = pd.read_csv(path)
-            result = analyze_process_relationships(
-                self.current_result.frames["products"],
-                self.current_result.frames["extracted"],
-                parameters,
-                self.time_tolerance.value(),
+            products_frame = self.current_result.frames["products"]
+            extracted_frame = self.current_result.frames["extracted"]
+            relationship_results: list[tuple[str, str, Any]] = []
+            scopes = (
+                products_frame["analysis_scope"].dropna().astype(str).drop_duplicates().tolist()
+                if "analysis_scope" in products_frame else ["全部"]
             )
-            self.relationship_metrics.set_frame(result.parameter_metrics)
-            self.relationship_bins.set_frame(result.binned_rates)
-            self.relationship_model.set_frame(result.model_importance)
+            for scope in scopes:
+                scope_products = (
+                    products_frame[products_frame["analysis_scope"].astype(str).eq(scope)]
+                    if "analysis_scope" in products_frame else products_frame
+                )
+                scope_defects = (
+                    extracted_frame[extracted_frame["analysis_scope"].astype(str).eq(scope)]
+                    if "analysis_scope" in extracted_frame else extracted_frame
+                )
+                targets: list[tuple[str, pd.DataFrame]] = [("图片算法检出", scope_defects)]
+                for label, column, expected in (
+                    ("AOI_NOK", "aoi_state", "NOK"), ("VI_NOK", "vi_state", "NOK"),
+                ):
+                    if column in scope_products:
+                        orders = scope_products.loc[scope_products[column].astype(str).eq(expected), "global_order"]
+                        targets.append((label, pd.DataFrame({"global_order": orders, "component_area": 1})))
+                if "vi_defect_code" in scope_products:
+                    codes = scope_products["vi_defect_code"].fillna("").astype(str).str.split(";").explode()
+                    codes = codes[codes.str.strip().ne("")].str.strip()
+                    for code, count in codes.value_counts().items():
+                        if count < 5:
+                            continue
+                        has_code = scope_products["vi_defect_code"].fillna("").astype(str).str.split(";").map(
+                            lambda values, target=code: target in values
+                        )
+                        orders = scope_products.loc[has_code, "global_order"]
+                        targets.append((f"VI_CODE_{code}", pd.DataFrame({"global_order": orders, "component_area": 1})))
+                for target_name, target_defects in targets:
+                    relationship_results.append((scope, target_name, analyze_process_relationships(
+                        scope_products, target_defects, parameters, self.time_tolerance.value(),
+                    )))
+            scope, target_name, result = relationship_results[0]
+            metric_parts = []
+            bin_parts = []
+            model_parts = []
+            summary_rows = []
+            for scope_name, target, item in relationship_results:
+                for parts, frame in ((metric_parts, item.parameter_metrics), (bin_parts, item.binned_rates), (model_parts, item.model_importance)):
+                    enriched = frame.copy()
+                    enriched.insert(0, "target", target)
+                    enriched.insert(0, "analysis_scope", scope_name)
+                    parts.append(enriched)
+                summary_rows.append({"analysis_scope": scope_name, "target": target, **item.summary})
+            combined_metrics = pd.concat(metric_parts, ignore_index=True)
+            combined_bins = pd.concat(bin_parts, ignore_index=True)
+            combined_models = pd.concat(model_parts, ignore_index=True)
+            self.relationship_metrics.set_frame(combined_metrics)
+            self.relationship_bins.set_frame(combined_bins)
+            self.relationship_model.set_frame(combined_models)
             summary = result.summary
             self.relationship_summary.setText(
                 f"关联键：{summary['join_key']}；匹配：{summary['matched_count']}/"
@@ -917,17 +1140,17 @@ class MainWindow(QMainWindow):
                 f"AUC：{summary['validation_auc'] if summary['validation_auc'] is not None else '-'}"
             )
             output = self.current_result.output_dir
-            result.parameter_metrics.to_csv(
+            combined_metrics.to_csv(
                 output / "process_parameter_metrics.csv", index=False, encoding="utf-8-sig"
             )
-            result.binned_rates.to_csv(
+            combined_bins.to_csv(
                 output / "process_parameter_binned_rates.csv", index=False, encoding="utf-8-sig"
             )
-            result.model_importance.to_csv(
+            combined_models.to_csv(
                 output / "process_model_importance.csv", index=False, encoding="utf-8-sig"
             )
             (output / "process_relationship_summary.json").write_text(
-                json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+                json.dumps(summary_rows, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             self.review.set_process_data(result.joined)
             self.statusBar().showMessage("工艺参数关联分析完成", 5000)
@@ -952,6 +1175,10 @@ class MainWindow(QMainWindow):
         ):
             self.settings.setValue(key, value)
         self.settings.setValue("station/id", self.station_combo.currentData())
+        self.settings.setValue("task/mode", self.task_mode_combo.currentData())
+        self.settings.setValue("task/scope", self.scope_combo.currentData())
+        for scope, edit in self.scope_image_edits.items():
+            self.settings.setValue(f"paths/image_root_{scope.lower()}", edit.text())
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("window/maximized", self.isMaximized())
         self.settings.setValue(

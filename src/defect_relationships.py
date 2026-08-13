@@ -10,6 +10,21 @@ import pandas as pd
 def analyze_defect_relationships(
     products: pd.DataFrame, defects: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if "analysis_scope" in defects and defects["analysis_scope"].nunique() > 1:
+        cooccurrences = []
+        transitions = []
+        for scope in defects["analysis_scope"].dropna().astype(str).drop_duplicates():
+            scope_defects = defects[defects["analysis_scope"].astype(str).eq(scope)]
+            scope_products = (
+                products[products["analysis_scope"].astype(str).eq(scope)]
+                if "analysis_scope" in products else products
+            )
+            cooccurrence, transition = analyze_defect_relationships(scope_products, scope_defects)
+            cooccurrence.insert(0, "analysis_scope", scope)
+            transition.insert(0, "analysis_scope", scope)
+            cooccurrences.append(cooccurrence)
+            transitions.append(transition)
+        return pd.concat(cooccurrences, ignore_index=True), pd.concat(transitions, ignore_index=True)
     columns = ["缺陷A", "缺陷B", "共现产品数", "P(B|A)", "P(A|B)", "提升度"]
     transition_columns = ["前一缺陷", "后一缺陷", "转移次数", "条件概率", "平均间隔片数"]
     if defects.empty:

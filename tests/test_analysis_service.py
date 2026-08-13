@@ -128,3 +128,31 @@ def test_downsampled_e_image_generates_visualization_preview(tmp_path: Path) -> 
     assert result.summary["micro_defect_count"] == 0
     assert result.summary["region_anomaly_count"] == 0
     assert "detection_type" in result.frames["extracted"]
+
+
+def test_multi_scope_analysis_is_isolated_and_writes_scope_outputs(tmp_path: Path) -> None:
+    image = np.full((64, 64), 70, dtype=np.uint8)
+    annotated = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(annotated, (20, 20), (28, 28), (0, 0, 255), thickness=-1)
+    a_path, e_path = tmp_path / "a.png", tmp_path / "e.png"
+    cv2.imencode(".png", image)[1].tofile(str(a_path))
+    cv2.imencode(".png", annotated)[1].tofile(str(e_path))
+    products = pd.DataFrame({
+        "global_order": [1, 2, 3, 4], "scope_order": [1, 2, 1, 2],
+        "analysis_scope": ["5S", "5S", "5X", "5X"],
+        "order_code": ["A1", "A2", "B1", "B2"],
+        "dmc_raw": ["A1", "A2", "B1", "B2"],
+        "camera": ["5S", "5S", "5X", "5X"],
+        "a_image_path": [str(a_path)] * 4, "e_image_path": [str(e_path)] * 4,
+    })
+    result = run_analysis_task(AnalysisRequest(
+        None, PROJECT_ROOT / "config/analysis_config.yaml", tmp_path, "多范围",
+        products_frame=products, source_index_frame=products,
+        analysis_mode="full_process", enabled_scopes=("5S", "5X"),
+    ))
+    assert result.summary["enabled_scopes"] == ["5S", "5X"]
+    assert set(result.frames["extracted"].analysis_scope) == {"5S", "5X"}
+    assert set(result.frames["extracted"].cluster_id) == {"5S-C001", "5X-C001"}
+    for scope in ("5S", "5X"):
+        assert (result.output_dir / "scopes" / scope / "products.csv").is_file()
+        assert (result.output_dir / "scopes" / scope / "extracted_defects.csv").is_file()

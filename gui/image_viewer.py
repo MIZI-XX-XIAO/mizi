@@ -8,11 +8,12 @@ from typing import Any
 import cv2
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import QObject, QRectF, QRunnable, Qt, QThreadPool, Signal
-from PySide6.QtGui import QImage, QPen, QPixmap
+from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThreadPool, Signal
+from PySide6.QtGui import QIcon, QImage, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene,
-    QGraphicsView, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QGraphicsView, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QPushButton, QScrollArea,
     QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -147,6 +148,9 @@ class ImageReviewWidget(QWidget):
         self.products = pd.DataFrame()
         self.detections = pd.DataFrame()
         self.process_data = pd.DataFrame()
+        self.station_events = pd.DataFrame()
+        self.station_parameters = pd.DataFrame()
+        self.package_data = pd.DataFrame()
         self.config: dict[str, Any] = {}
         self.current_order: int | None = None
         self._request_id = 0
@@ -180,6 +184,15 @@ class ImageReviewWidget(QWidget):
 
         self.info = QLabel("尚未加载分析结果")
         self.info.setWordWrap(True)
+        self.search_edit = QLineEdit()
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setPlaceholderText("搜索完整或部分 Ident No.")
+        self.search_edit.textChanged.connect(self._filter_product_list)
+        self.product_list = QListWidget()
+        self.product_list.setObjectName("productThumbnailList")
+        self.product_list.setIconSize(QSize(96, 64))
+        self.product_list.setMinimumWidth(210)
+        self.product_list.currentItemChanged.connect(self._select_product_item)
         self.order_spin = QSpinBox()
         self.order_spin.setKeyboardTracking(False)
         self.layout_combo = QComboBox()
@@ -247,13 +260,21 @@ class ImageReviewWidget(QWidget):
         detail_layout.addWidget(self.detail_label)
         detail_layout.addStretch()
         detail_scroll.setWidget(detail_widget)
+        browser = QWidget()
+        browser_layout = QVBoxLayout(browser)
+        browser_layout.setContentsMargins(0, 0, 0, 0)
+        browser_layout.addWidget(QLabel("按真实生产顺序浏览"))
+        browser_layout.addWidget(self.search_edit)
+        browser_layout.addWidget(self.product_list, 1)
         splitter = QSplitter(Qt.Horizontal)
         splitter.setObjectName("reviewSplitter")
+        splitter.addWidget(browser)
         splitter.addWidget(view_container)
         splitter.addWidget(detail_scroll)
-        splitter.setStretchFactor(0, 5)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([1000, 260])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 5)
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([230, 900, 330])
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
@@ -266,6 +287,7 @@ class ImageReviewWidget(QWidget):
         self, products: pd.DataFrame, detections: pd.DataFrame, config: dict[str, Any]
     ) -> None:
         self.products, self.detections, self.config = products.copy(), detections.copy(), dict(config)
+        self._populate_product_list()
         if self.products.empty:
             return
         self.order_spin.setRange(
@@ -281,6 +303,51 @@ class ImageReviewWidget(QWidget):
         self.process_data = frame.copy()
         self._update_details()
 
+    def set_station_history(
+        self, events: pd.DataFrame, parameters: pd.DataFrame,
+        package: pd.DataFrame | None = None,
+    ) -> None:
+        self.station_events = events.copy()
+        self.station_parameters = parameters.copy()
+        self.package_data = package.copy() if package is not None else pd.DataFrame()
+        self._update_details()
+
+    def _populate_product_list(self) -> None:
+        self.product_list.blockSignals(True)
+        self.product_list.clear()
+        if not self.products.empty:
+            for row in self.products.sort_values("global_order").itertuples(index=False):
+                dmc = str(getattr(row, "dmc_raw", getattr(row, "order_code", "")))
+                scope = str(getattr(row, "analysis_scope", getattr(row, "camera", "")))
+                state = str(getattr(row, "aoi_state", "") or "未匹配")
+                timestamp = getattr(row, "aoi_test_date", None)
+                time_text = "" if pd.isna(timestamp) else pd.Timestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+                item = QListWidgetItem(f"[{scope}] #{int(row.global_order)}  {state}\n{dmc}\n{time_text}")
+                item.setData(Qt.UserRole, int(row.global_order))
+                item.setData(Qt.UserRole + 1, dmc.lower())
+                image_path = getattr(row, "e_image_path", "")
+                if image_path and Path(str(image_path)).is_file():
+                    item.setIcon(QIcon(str(image_path)))
+                self.product_list.addItem(item)
+        self.product_list.blockSignals(False)
+        self._filter_product_list(self.search_edit.text())
+
+    def _filter_product_list(self, text: str) -> None:
+        query = text.strip().lower()
+        first_visible = None
+        for index in range(self.product_list.count()):
+            item = self.product_list.item(index)
+            visible = not query or query in str(item.data(Qt.UserRole + 1))
+            item.setHidden(not visible)
+            if visible and first_visible is None:
+                first_visible = item
+        if query and first_visible is not None:
+            self.product_list.setCurrentItem(first_visible)
+
+    def _select_product_item(self, current: QListWidgetItem | None, _previous=None) -> None:
+        if current is not None:
+            self.jump_to(int(current.data(Qt.UserRole)))
+
     def jump_to(self, order: int) -> None:
         if self.products.empty:
             return
@@ -289,6 +356,14 @@ class ImageReviewWidget(QWidget):
             order = min(orders, key=lambda value: abs(value - order))
         self.order_spin.setValue(order)
         self.current_order = order
+        for index in range(self.product_list.count()):
+            item = self.product_list.item(index)
+            if int(item.data(Qt.UserRole)) == order:
+                self.product_list.blockSignals(True)
+                self.product_list.setCurrentItem(item)
+                self.product_list.scrollToItem(item)
+                self.product_list.blockSignals(False)
+                break
         self._load_current(False)
 
     def _load_current(self, original_region: bool) -> None:
@@ -384,11 +459,29 @@ class ImageReviewWidget(QWidget):
         rows = self.detections[self.detections.global_order == self.current_order]
         lines = [
             f"<b>产品序号：</b>{self.current_order}",
+            f"<b>分析范围：</b>{product.get('analysis_scope', product.get('camera', '-'))}",
+            f"<b>Ident No.：</b>{product.get('dmc_raw', product.get('order_code', '-'))}",
             f"<b>产品编码：</b>{product.get('order_code', '-')}",
             f"<b>相机：</b>{product.get('camera', '-')}",
             f"<b>批次：</b>{product.get('batch', product.get('batch_id', '-'))}",
             f"<b>缺陷数量：</b>{len(rows)}",
         ]
+        aoi_state = str(product.get("aoi_state", "") or "未匹配")
+        evaluable_rows = (
+            rows[rows["detection_type"].ne("region_anomaly")]
+            if "detection_type" in rows else rows
+        )
+        algorithm = "检出" if not evaluable_rows.empty else "未检出"
+        if aoi_state == "NOK": verdict = "命中" if algorithm == "检出" else "漏检候选"
+        elif aoi_state == "OK": verdict = "误报候选" if algorithm == "检出" else "正确无缺陷"
+        else: verdict = "不可评价"
+        lines.extend([
+            "<br><b>算法验真</b>",
+            f"AOI当站结果：{aoi_state}",
+            f"算法结果：{algorithm}",
+            f"对比结论：{verdict}",
+            f"真值匹配：{product.get('truth_match', '未提供')}",
+        ])
         for index, row in enumerate(rows.itertuples(index=False), 1):
             type_name = {
                 "micro": "微小缺陷", "local": "局部缺陷", "region_anomaly": "区域异常",
@@ -415,6 +508,42 @@ class ImageReviewWidget(QWidget):
                         value, (int, float, np.integer, np.floating)
                     ):
                         lines.append(f"{name}：{value}")
+        dmc = str(product.get("dmc_raw", product.get("order_code", "")))
+        if not self.station_events.empty and "dmc_raw" in self.station_events:
+            history = self.station_events[self.station_events.dmc_raw.astype(str).eq(dmc)].copy()
+            if not history.empty:
+                history = history.sort_values("test_date", na_position="last", kind="stable")
+                lines.append("<br><b>跨工站真实时间线</b>")
+                for _, event in history.iterrows():
+                    stamp = event.get("test_date")
+                    stamp_text = "时间未知" if pd.isna(stamp) else pd.Timestamp(stamp).strftime("%Y-%m-%d %H:%M:%S")
+                    result_bits = []
+                    for name, value in event.items():
+                        normalized = "".join(character.lower() for character in str(name) if character.isalnum())
+                        if any(token in normalized for token in ("failurecode", "failurescode", "blockcode")):
+                            if pd.notna(value) and str(value).strip():
+                                result_bits.append(f"{name}={value}")
+                    suffix = "；" + "；".join(result_bits) if result_bits else ""
+                    lines.append(
+                        f"{stamp_text}　{event.get('station_id') or event.get('station_title', '')}　"
+                        f"{event.get('state', 'UNKNOWN')}{suffix}"
+                    )
+                if not self.station_parameters.empty:
+                    params = self.station_parameters[
+                        self.station_parameters.dmc_raw.astype(str).eq(dmc)
+                    ]
+                    numeric = params.dropna(subset=["numeric_value"]) if "numeric_value" in params else pd.DataFrame()
+                    if not numeric.empty:
+                        lines.append("<br><b>最近工艺/检测参数（最多20项）</b>")
+                        for param in numeric.sort_values("test_date").tail(20).itertuples(index=False):
+                            lines.append(
+                                f"{param.station_id}.{param.parameter_name}：{param.numeric_value}"
+                                + (f"（规格 {param.tolerance_raw}）" if param.tolerance_raw else "")
+                            )
+        if not self.package_data.empty and "dmc_raw" in self.package_data:
+            package = self.package_data[self.package_data.dmc_raw.astype(str).eq(dmc)]
+            if not package.empty:
+                lines.append("<br><b>包装：</b>已有包装记录")
         self.detail_label.setText("<br>".join(lines))
 
     def _fit_all(self) -> None:
