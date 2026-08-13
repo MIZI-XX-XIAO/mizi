@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+build/
+*.spec
+.github_known_hosts_temp
+.pytest_cache/
+
