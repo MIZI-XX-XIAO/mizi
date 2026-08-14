@@ -3,12 +3,15 @@
 import os
 from pathlib import Path
 
+import cv2
+import numpy as np
+import pandas as pd
 import pytest
 from openpyxl import Workbook
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
-from PySide6.QtCore import QSize  # noqa: E402
+from PySide6.QtCore import QSize, Qt  # noqa: E402
 from PySide6.QtWidgets import QLabel  # noqa: E402
 
 from gui.main_window import MainWindow  # noqa: E402
@@ -121,6 +124,59 @@ def test_assistant_shell_is_offline_and_context_is_explicit(qtbot) -> None:
     assert "图片复核" in assistant.context_label.text()
     assistant.clear_context()
     assert "尚未附加" in assistant.context_label.text()
+    window.close()
+    window.deleteLater()
+
+
+def test_pattern_evidence_strip_and_fullscreen_review(qtbot, tmp_path: Path) -> None:
+    project = Path(__file__).resolve().parents[1]
+    import yaml
+    config = yaml.safe_load((project / "config/analysis_config.yaml").read_text(encoding="utf-8"))
+    a_image = np.full((80, 120), 70, dtype=np.uint8)
+    e_image = cv2.cvtColor(a_image, cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(e_image, (30, 20), (42, 32), (0, 0, 255), thickness=-1)
+    a_path, e_path = tmp_path / "a.png", tmp_path / "e.png"
+    cv2.imencode(".png", a_image)[1].tofile(str(a_path))
+    cv2.imencode(".png", e_image)[1].tofile(str(e_path))
+    products = pd.DataFrame({
+        "global_order": [1, 2, 3], "analysis_scope": ["5S"] * 3,
+        "order_code": ["P1", "P2", "P3"], "dmc_raw": ["P1", "P2", "P3"],
+        "camera": ["5S"] * 3, "a_image_path": [str(a_path)] * 3,
+        "e_image_path": [str(e_path)] * 3,
+    })
+    window = MainWindow(project)
+    qtbot.addWidget(window)
+    window.show()
+    window.tabs.setCurrentWidget(window.review)
+    window.review.set_data(products, pd.DataFrame({"global_order": pd.Series(dtype=int)}), config)
+    qtbot.waitUntil(lambda: window.review._payload is not None, timeout=10_000)
+
+    pattern = pd.Series({
+        "pattern_id": "5S-P001", "pattern_type": "periodic", "cluster_id": "5S-C001",
+        "period": 2, "confidence": 0.9, "first_order": 1,
+        "observed_orders": "1;3", "inferred_missing_orders": "2",
+    })
+    window.tabs.setCurrentIndex(3)
+    window._jump_from_pattern(pattern)
+    assert window.tabs.currentWidget() is window.review
+    assert window.review.pattern_record is not None
+    assert window.review.pattern_panel.isVisible()
+    assert window.review.pattern_list.count() == 3
+    assert window.review.pattern_list.item(1).data(Qt.UserRole + 1) == "missing"
+    window.review.pattern_list.setCurrentRow(2)
+    qtbot.waitUntil(lambda: window.review.current_order == 3, timeout=5_000)
+
+    window.review._open_pattern_item_fullscreen(window.review.pattern_list.item(0))
+    qtbot.waitUntil(
+        lambda: window.review._fullscreen is not None and window.review._fullscreen.isVisible(),
+        timeout=10_000,
+    )
+    assert window.review._fullscreen.image_type == "E图"
+    assert window.review.current_order == 1
+    qtbot.keyClick(window.review._fullscreen, Qt.Key_Escape)
+    qtbot.waitUntil(lambda: not window.review._fullscreen.isVisible(), timeout=5_000)
+    assert window.review.pattern_panel.isVisible()
+    assert window.review.current_order == 1
     window.close()
     window.deleteLater()
 

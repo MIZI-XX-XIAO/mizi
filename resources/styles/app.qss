@@ -22,3 +22,12 @@ QFrame#kpiCard { background: white; border: 1px solid #d7dee7; border-radius: 6p
 QLabel#warningBanner { background: #fff4ce; border: 1px solid #e2b93b; border-radius: 4px; padding: 8px; }
 QLabel#successBanner { background: #e7f6ec; border: 1px solid #53a66f; border-radius: 4px; padding: 8px; }
 QLabel#errorBanner { background: #fde8e8; border: 1px solid #d96c6c; border-radius: 4px; padding: 8px; }
+QWidget#patternEvidencePanel { background: #eef5fb; border: 1px solid #9bbbd7; border-radius: 6px; }
+QLabel#patternSummary { color: #14324a; font-weight: 600; }
+QListWidget#patternEvidenceList { background: white; border: 1px solid #c9d2dc; }
+QListWidget#patternEvidenceList::item { border: 2px solid #7aa7cc; border-radius: 5px; padding: 3px; margin: 3px; }
+QListWidget#patternEvidenceList::item:selected { background: #d9ecff; border-color: #0b5cab; color: #082f52; }
+QListWidget#patternEvidenceList::item:disabled { background: #e5e7eb; border-color: #9ca3af; color: #6b7280; }
+QPushButton#fullscreenButton { padding: 2px 9px; min-height: 18px; }
+QWidget#fullscreenImageWindow { background: #07111d; }
+QWidget#fullscreenImageWindow QLabel#fullscreenTitle { color: white; font-size: 14pt; font-weight: 700; }
