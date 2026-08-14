@@ -7,12 +7,19 @@ import numpy as np
 import pandas as pd
 
 from src.analysis_service import (
-    AnalysisCallbacks, AnalysisRequest, CancellationToken, resolve_image_path, run_analysis_task,
-    validate_analysis_request,
+    AnalysisCallbacks, AnalysisRequest, CancellationToken, _map_order_list, resolve_image_path,
+    run_analysis_task, validate_analysis_request,
 )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_scope_order_lists_map_to_global_orders() -> None:
+    mapping = {1: 2, 2: 4, 3: 7}
+    assert _map_order_list("1;2;3", mapping) == "2;4;7"
+    assert _map_order_list("", mapping) == ""
+    assert _map_order_list("bad;2;99", mapping) == "4"
 
 
 def _subset_products(tmp_path: Path, count: int = 5) -> Path:

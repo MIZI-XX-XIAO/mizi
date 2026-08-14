@@ -30,6 +30,21 @@ from .pattern_analyzer import OnlinePatternEngine
 STAGES = ("VALIDATING", "EXTRACTING", "ANALYZING", "WRITING", "VISUALIZING", "COMPLETE")
 
 
+def _map_order_list(value: Any, order_mapping: dict[int, int]) -> str:
+    """Map a semicolon-delimited scope-order list to global product orders."""
+    if value is None or pd.isna(value):
+        return ""
+    mapped: list[str] = []
+    for part in str(value).split(";"):
+        try:
+            scope_order = int(float(part.strip()))
+        except (TypeError, ValueError):
+            continue
+        if scope_order in order_mapping:
+            mapped.append(str(int(order_mapping[scope_order])))
+    return ";".join(mapped)
+
+
 def load_analysis_config(path: Path) -> dict[str, Any]:
     """加载并校验生产缺陷分析所需的YAML参数。"""
     with path.open("r", encoding="utf-8") as handle:
@@ -327,11 +342,20 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
                 for column in ("first_order", "last_order", "confirmed_at_order", "next_expected_order"):
                     if column in scope_patterns:
                         scope_patterns[column] = scope_patterns[column].map(order_to_global)
+                for column in ("observed_orders", "inferred_missing_orders"):
+                    if column in scope_patterns:
+                        scope_patterns[column] = scope_patterns[column].map(
+                            lambda value: _map_order_list(value, order_to_global)
+                        )
             if not scope_alerts.empty:
                 scope_alerts["alert_id"] = scope + "-" + scope_alerts["alert_id"].astype(str)
                 for column in ("alert_at_order", "predicted_order"):
                     if column in scope_alerts:
                         scope_alerts[column] = scope_alerts[column].map(order_to_global)
+                if "evidence_orders" in scope_alerts:
+                    scope_alerts["evidence_orders"] = scope_alerts["evidence_orders"].map(
+                        lambda value: _map_order_list(value, order_to_global)
+                    )
             assigned_parts.append(scope_assigned)
             cluster_parts.append(scope_clusters)
             pattern_parts.append(scope_patterns)

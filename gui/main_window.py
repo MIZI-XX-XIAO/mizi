@@ -1043,11 +1043,13 @@ class MainWindow(QMainWindow):
             self.run_log.append("已请求安全取消，当前图片处理完成后停止。")
 
     def _jump_from_alert(self, record: pd.Series) -> None:
+        self.review.exit_pattern_review()
         self.review.jump_to(int(float(record["alert_at_order"])))
         self.tabs.setCurrentWidget(self.review)
 
     def _jump_from_pattern(self, record: pd.Series) -> None:
-        self.review.jump_to(int(float(record["first_order"])))
+        if not self.review.show_pattern(record):
+            self.review.jump_to(int(float(record["first_order"])))
         self.tabs.setCurrentWidget(self.review)
 
     def _analyze_process_parameters(self) -> None:

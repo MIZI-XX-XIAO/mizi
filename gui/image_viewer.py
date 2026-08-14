@@ -9,10 +9,10 @@ import cv2
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThreadPool, Signal
-from PySide6.QtGui import QIcon, QImage, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene,
-    QGraphicsView, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QGraphicsView, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
     QListWidgetItem, QPushButton, QScrollArea,
     QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
@@ -35,6 +35,7 @@ def _pixmap(image: np.ndarray) -> QPixmap:
 
 class ZoomGraphicsView(QGraphicsView):
     zoom_requested = Signal(float)
+    fullscreen_requested = Signal()
 
     def __init__(self, title: str) -> None:
         super().__init__()
@@ -64,6 +65,13 @@ class ZoomGraphicsView(QGraphicsView):
             self.resetTransform()
             self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
 
+    def set_message(self, message: str) -> None:
+        self.scene.clear()
+        item = self.scene.addText(message)
+        item.setDefaultTextColor(QColor("#dfe7ef"))
+        self.scene.setSceneRect(item.boundingRect())
+        self.fit_content()
+
     def apply_zoom(self, factor: float) -> None:
         self.scale(factor, factor)
 
@@ -71,6 +79,63 @@ class ZoomGraphicsView(QGraphicsView):
         factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
         self.apply_zoom(factor)
         self.zoom_requested.emit(factor)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        self.fullscreen_requested.emit()
+        event.accept()
+
+
+class FullscreenImageWindow(QWidget):
+    """Borderless single-image viewer that preserves the review widget's state."""
+
+    previous_requested = Signal()
+    next_requested = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent, Qt.Window | Qt.FramelessWindowHint)
+        self.setObjectName("fullscreenImageWindow")
+        self.image_type = "E图"
+        self.view = ZoomGraphicsView("全屏图片")
+        self.view.fullscreen_requested.connect(self.close)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("fullscreenTitle")
+        previous = QPushButton("上一证据")
+        previous.clicked.connect(self.previous_requested)
+        following = QPushButton("下一证据")
+        following.clicked.connect(self.next_requested)
+        close_button = QPushButton("退出全屏  Esc")
+        close_button.clicked.connect(self.close)
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(self.title_label, 1)
+        toolbar.addWidget(previous)
+        toolbar.addWidget(following)
+        toolbar.addWidget(close_button)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.addLayout(toolbar)
+        layout.addWidget(self.view, 1)
+
+    def set_content(
+        self, image_type: str, order: int | None, image: np.ndarray,
+        boxes: list[tuple[float, float, float, float]] | None = None,
+    ) -> None:
+        self.image_type = image_type
+        order_text = "" if order is None else f"　产品 #{order}"
+        self.title_label.setText(f"{image_type}{order_text}")
+        self.view.set_content(image, boxes)
+
+    def set_message(self, image_type: str, order: int | None, message: str) -> None:
+        self.image_type = image_type
+        order_text = "" if order is None else f"　产品 #{order}"
+        self.title_label.setText(f"{image_type}{order_text}")
+        self.view.set_message(message)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _LoadSignals(QObject):
@@ -153,8 +218,13 @@ class ImageReviewWidget(QWidget):
         self.package_data = pd.DataFrame()
         self.config: dict[str, Any] = {}
         self.current_order: int | None = None
+        self.pattern_record: pd.Series | None = None
+        self.pattern_orders: list[int] = []
         self._request_id = 0
         self._payload: dict[str, Any] | None = None
+        self._payload_order: int | None = None
+        self._fullscreen: FullscreenImageWindow | None = None
+        self._fullscreen_after_load: str | None = None
         self._thread_pool = QThreadPool.globalInstance()
         self.views = {
             "A图": ZoomGraphicsView("A图"), "E图": ZoomGraphicsView("E图"),
@@ -168,9 +238,17 @@ class ImageReviewWidget(QWidget):
             card_layout.setContentsMargins(2, 2, 2, 2)
             title = QLabel(name)
             title.setObjectName("viewTitle")
-            card_layout.addWidget(title)
+            fullscreen = QPushButton("全屏")
+            fullscreen.setObjectName("fullscreenButton")
+            fullscreen.clicked.connect(lambda _checked=False, image_type=name: self.open_fullscreen(image_type))
+            title_row = QHBoxLayout()
+            title_row.addWidget(title)
+            title_row.addStretch()
+            title_row.addWidget(fullscreen)
+            card_layout.addLayout(title_row)
             card_layout.addWidget(view, 1)
             self.cards[name] = card
+            view.fullscreen_requested.connect(lambda image_type=name: self.open_fullscreen(image_type))
         for source_name, source_view in self.views.items():
             source_view.zoom_requested.connect(
                 lambda factor, name=source_name: self._sync_zoom(name, factor)
@@ -210,6 +288,39 @@ class ImageReviewWidget(QWidget):
         self.mask_check = QCheckBox("Mask")
         self.mask_check.setChecked(True)
         self.mask_check.toggled.connect(self._apply_layout)
+
+        self.pattern_panel = QWidget()
+        self.pattern_panel.setObjectName("patternEvidencePanel")
+        self.pattern_summary = QLabel()
+        self.pattern_summary.setObjectName("patternSummary")
+        self.pattern_summary.setWordWrap(True)
+        self.pattern_list = QListWidget()
+        self.pattern_list.setObjectName("patternEvidenceList")
+        self.pattern_list.setViewMode(QListView.IconMode)
+        self.pattern_list.setFlow(QListView.LeftToRight)
+        self.pattern_list.setWrapping(False)
+        self.pattern_list.setResizeMode(QListView.Adjust)
+        self.pattern_list.setMovement(QListView.Static)
+        self.pattern_list.setIconSize(QSize(128, 82))
+        self.pattern_list.setFixedHeight(132)
+        self.pattern_list.currentItemChanged.connect(self._select_pattern_item)
+        self.pattern_list.itemDoubleClicked.connect(self._open_pattern_item_fullscreen)
+        previous_evidence = QPushButton("上一证据")
+        previous_evidence.clicked.connect(lambda: self._jump_pattern_evidence(-1))
+        next_evidence = QPushButton("下一证据")
+        next_evidence.clicked.connect(lambda: self._jump_pattern_evidence(1))
+        exit_pattern = QPushButton("退出规律复核")
+        exit_pattern.clicked.connect(self.exit_pattern_review)
+        pattern_toolbar = QHBoxLayout()
+        pattern_toolbar.addWidget(self.pattern_summary, 1)
+        pattern_toolbar.addWidget(previous_evidence)
+        pattern_toolbar.addWidget(next_evidence)
+        pattern_toolbar.addWidget(exit_pattern)
+        pattern_layout = QVBoxLayout(self.pattern_panel)
+        pattern_layout.setContentsMargins(8, 8, 8, 8)
+        pattern_layout.addLayout(pattern_toolbar)
+        pattern_layout.addWidget(self.pattern_list)
+        self.pattern_panel.setVisible(False)
 
         controls = QHBoxLayout()
         for title, callback in (
@@ -279,6 +390,7 @@ class ImageReviewWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
         layout.addLayout(display_controls)
+        layout.addWidget(self.pattern_panel)
         layout.addWidget(self.info)
         layout.addWidget(splitter, 1)
         self._apply_layout()
@@ -286,6 +398,9 @@ class ImageReviewWidget(QWidget):
     def set_data(
         self, products: pd.DataFrame, detections: pd.DataFrame, config: dict[str, Any]
     ) -> None:
+        self.exit_pattern_review()
+        self._payload = None
+        self._payload_order = None
         self.products, self.detections, self.config = products.copy(), detections.copy(), dict(config)
         self._populate_product_list()
         if self.products.empty:
@@ -298,6 +413,123 @@ class ImageReviewWidget(QWidget):
             if not self.detections.empty else int(self.products.global_order.iloc[0])
         )
         self.jump_to(first)
+
+    @staticmethod
+    def _parse_orders(value: Any) -> list[int]:
+        if value is None or pd.isna(value):
+            return []
+        orders: list[int] = []
+        for part in str(value).split(";"):
+            try:
+                orders.append(int(float(part.strip())))
+            except (TypeError, ValueError):
+                continue
+        return sorted(set(orders))
+
+    def show_pattern(self, record: pd.Series) -> bool:
+        """Enter pattern-review mode and select the first available evidence image."""
+        self.exit_pattern_review()
+        if self.products.empty:
+            return False
+        observed = self._parse_orders(record.get("observed_orders"))
+        missing = self._parse_orders(record.get("inferred_missing_orders"))
+        if not observed:
+            observed = self._parse_orders(record.get("first_order"))
+        if not observed and not missing:
+            return False
+        self.pattern_record = record.copy()
+        available = set(self.products.global_order.astype(int))
+        self.pattern_list.blockSignals(True)
+        for order in sorted(set(observed + missing)):
+            status = "missing" if order in missing else "observed"
+            caption = f"#{order}\n" + ("周期缺失" if status == "missing" else "规律命中")
+            item = QListWidgetItem(caption)
+            item.setData(Qt.UserRole, order)
+            item.setData(Qt.UserRole + 1, status)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setSizeHint(QSize(154, 112))
+            if status == "missing":
+                item.setBackground(QBrush(QColor("#e5e7eb")))
+                item.setForeground(QBrush(QColor("#4b5563")))
+                item.setToolTip("该周期位置预期出现规律缺陷，但算法未检出")
+            else:
+                item.setBackground(QBrush(QColor("#eef6ff")))
+            matches = self.products[self.products.global_order.astype(int).eq(order)]
+            if not matches.empty:
+                path = str(matches.iloc[0].get("e_image_path", ""))
+                if path and Path(path).is_file():
+                    item.setIcon(QIcon(path))
+                else:
+                    item.setToolTip("E图文件不存在，可点击查看其他可用视图")
+            else:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                item.setToolTip("当前数据范围内没有该产品")
+            self.pattern_list.addItem(item)
+        self.pattern_list.blockSignals(False)
+        self.pattern_orders = [
+            int(self.pattern_list.item(index).data(Qt.UserRole))
+            for index in range(self.pattern_list.count())
+            if self.pattern_list.item(index).flags() & Qt.ItemIsEnabled
+        ]
+        pattern_type = str(record.get("pattern_type", "-"))
+        period = record.get("period")
+        period_text = "—" if pd.isna(period) else str(int(float(period)))
+        confidence = record.get("confidence")
+        confidence_text = "—" if pd.isna(confidence) else f"{float(confidence):.1%}"
+        self.pattern_summary.setText(
+            f"规律 {record.get('pattern_id', '-')}　类型：{pattern_type}　"
+            f"空间簇：{record.get('cluster_id', '-')}　周期：{period_text}　"
+            f"置信度：{confidence_text}　命中：{len(observed)}　缺失：{len(missing)}"
+        )
+        self.pattern_panel.setVisible(True)
+        target = next((order for order in observed if order in available), None)
+        if target is None:
+            target = next((order for order in missing if order in available), None)
+        if target is None:
+            self.exit_pattern_review()
+            return False
+        self._set_pattern_current(target)
+        self.jump_to(target)
+        return True
+
+    def exit_pattern_review(self) -> None:
+        self.pattern_record = None
+        self.pattern_orders = []
+        self.pattern_list.blockSignals(True)
+        self.pattern_list.clear()
+        self.pattern_list.blockSignals(False)
+        self.pattern_panel.setVisible(False)
+
+    def _set_pattern_current(self, order: int) -> None:
+        for index in range(self.pattern_list.count()):
+            item = self.pattern_list.item(index)
+            if int(item.data(Qt.UserRole)) == order:
+                self.pattern_list.blockSignals(True)
+                self.pattern_list.setCurrentItem(item)
+                self.pattern_list.scrollToItem(item)
+                self.pattern_list.blockSignals(False)
+                break
+
+    def _select_pattern_item(self, current: QListWidgetItem | None, _previous=None) -> None:
+        if current is not None and current.flags() & Qt.ItemIsEnabled:
+            self.jump_to(int(current.data(Qt.UserRole)))
+
+    def _open_pattern_item_fullscreen(self, item: QListWidgetItem) -> None:
+        if not item.flags() & Qt.ItemIsEnabled:
+            return
+        self._fullscreen_after_load = "E图"
+        self.jump_to(int(item.data(Qt.UserRole)))
+
+    def _jump_pattern_evidence(self, direction: int) -> None:
+        if not self.pattern_orders:
+            return
+        try:
+            index = self.pattern_orders.index(int(self.current_order))
+        except (ValueError, TypeError):
+            index = 0 if direction > 0 else len(self.pattern_orders) - 1
+        else:
+            index = max(0, min(len(self.pattern_orders) - 1, index + direction))
+        self.jump_to(self.pattern_orders[index])
 
     def set_process_data(self, frame: pd.DataFrame) -> None:
         self.process_data = frame.copy()
@@ -356,6 +588,8 @@ class ImageReviewWidget(QWidget):
             order = min(orders, key=lambda value: abs(value - order))
         self.order_spin.setValue(order)
         self.current_order = order
+        if self.pattern_record is not None:
+            self._set_pattern_current(order)
         for index in range(self.product_list.count()):
             item = self.product_list.item(index)
             if int(item.data(Qt.UserRole)) == order:
@@ -384,16 +618,31 @@ class ImageReviewWidget(QWidget):
         if request_id != self._request_id:
             return
         self._payload = payload
+        self._payload_order = self.current_order
         self._render_payload()
         rows = self.detections[self.detections.global_order == self.current_order]
         areas = ",".join(str(int(value)) for value in rows.component_area.tolist()) if not rows.empty else "无"
         self.info.setText(
             f"#{self.current_order}　检测框：{len(rows)}　E图面积：{areas}　{payload['region_text']}"
         )
+        if self._fullscreen_after_load:
+            image_type = self._fullscreen_after_load
+            self._fullscreen_after_load = None
+            self.open_fullscreen(image_type)
+        elif self._fullscreen is not None and self._fullscreen.isVisible():
+            self._update_fullscreen(self._fullscreen.image_type)
 
     def _load_failed(self, request_id: int, message: str) -> None:
         if request_id == self._request_id:
             self.info.setText(f"图片加载失败：{message}")
+            image_type = self._fullscreen_after_load
+            self._fullscreen_after_load = None
+            if image_type:
+                self._show_fullscreen_error(image_type, message)
+            elif self._fullscreen is not None and self._fullscreen.isVisible():
+                self._fullscreen.set_message(
+                    self._fullscreen.image_type, self.current_order, f"图片加载失败\n{message}"
+                )
 
     def _render_payload(self) -> None:
         if not self._payload:
@@ -403,6 +652,45 @@ class ImageReviewWidget(QWidget):
         self.views["E图"].set_content(self._payload["e"], boxes)
         self.views["差异图"].set_content(self._payload["diff"])
         self.views["Mask"].set_content(self._payload["mask"], boxes)
+
+    def _update_fullscreen(self, image_type: str) -> None:
+        if not self._payload or self._fullscreen is None:
+            return
+        payload_key = {"A图": "a", "E图": "e", "差异图": "diff", "Mask": "mask"}.get(image_type)
+        if payload_key is None:
+            return
+        boxes = (
+            self._payload["boxes"]
+            if image_type in {"E图", "Mask"} and self.overlay_check.isChecked() else []
+        )
+        self._fullscreen.set_content(
+            image_type, self.current_order, self._payload[payload_key], boxes
+        )
+
+    def open_fullscreen(self, image_type: str) -> None:
+        """Open one rendered review image in a borderless full-screen window."""
+        if image_type not in {"A图", "E图", "差异图", "Mask"}:
+            return
+        if not self._payload or self._payload_order != self.current_order:
+            self._fullscreen_after_load = image_type
+            self._load_current(False)
+            return
+        if self._fullscreen is None:
+            self._fullscreen = FullscreenImageWindow(self)
+            self._fullscreen.previous_requested.connect(lambda: self._jump_pattern_evidence(-1))
+            self._fullscreen.next_requested.connect(lambda: self._jump_pattern_evidence(1))
+        self._update_fullscreen(image_type)
+        self._fullscreen.showFullScreen()
+        self._fullscreen.raise_()
+        self._fullscreen.activateWindow()
+
+    def _show_fullscreen_error(self, image_type: str, message: str) -> None:
+        if self._fullscreen is None:
+            self._fullscreen = FullscreenImageWindow(self)
+            self._fullscreen.previous_requested.connect(lambda: self._jump_pattern_evidence(-1))
+            self._fullscreen.next_requested.connect(lambda: self._jump_pattern_evidence(1))
+        self._fullscreen.set_message(image_type, self.current_order, f"图片加载失败\n{message}")
+        self._fullscreen.showFullScreen()
 
     def _apply_layout(self, *_args) -> None:
         while self.view_grid.count():

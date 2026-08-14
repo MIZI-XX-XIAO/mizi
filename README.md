@@ -99,6 +99,27 @@ $env:MEA5S_REAL_DATA_ROOT="D:\本地数据\dataset_realistic"
 
 GitHub Actions在Windows和Python 3.12环境中执行无生产数据的依赖安装、分析服务、CSV写入和Qt离屏测试。真实数据不会上传到GitHub Actions。
 
+## 一键提交到GitHub
+
+双击仓库根目录的 `一键提交到GitHub.bat`，输入 commit 信息并确认后，脚本会：
+
+1. 排除 `__pycache__`、`.pyc` 和分析输出等生成文件。
+2. 列出本次准备提交的文件，等待确认。
+3. 如果当前位于 `main`，自动创建 `codex/update-时间戳` 分支。
+4. 提交并推送到 `origin`，随后可在GitHub创建Pull Request。
+
+也可以在PowerShell中运行：
+
+```powershell
+.\scripts\publish_to_github.ps1 -Message "feat: update analysis UI"
+```
+
+仅检查将要提交的内容而不修改仓库：
+
+```powershell
+.\scripts\publish_to_github.ps1 -Message "dry run" -DryRun
+```
+
 ## 离线安装
 
 联网电脑运行 `python scripts/prepare_offline_dependencies.py`。公司电脑创建虚拟环境后执行：
