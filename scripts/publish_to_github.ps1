@@ -5,8 +5,6 @@ param(
 
     [string]$Remote = "origin",
 
-    [string]$BranchName,
-
     [switch]$DryRun,
 
     [switch]$Yes
@@ -94,16 +92,7 @@ try {
     } else {
         "main"
     }
-    $targetBranch = $currentBranch
-    if ($currentBranch -eq $defaultBranch) {
-        $targetBranch = if ($BranchName) {
-            $BranchName
-        } else {
-            "codex/update-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        }
-    } elseif ($BranchName -and $BranchName -ne $currentBranch) {
-        throw "Current branch '$currentBranch' differs from BranchName '$BranchName'."
-    }
+    $targetBranch = $defaultBranch
 
     Write-Host ""
     Write-Host "Files selected for commit:" -ForegroundColor Cyan
@@ -114,7 +103,7 @@ try {
     Write-Host ""
     Write-Host "Commit: $Message"
     Write-Host "Remote: $Remote"
-    Write-Host "Branch: $targetBranch"
+    Write-Host "Push:   $currentBranch -> $Remote/$targetBranch"
 
     if ($DryRun) {
         Write-Host "Dry run complete. No branch, commit, or remote was changed." -ForegroundColor Yellow
@@ -129,8 +118,10 @@ try {
         }
     }
 
-    if ($targetBranch -ne $currentBranch) {
-        Invoke-Git switch -c $targetBranch
+    Invoke-Git fetch $Remote $targetBranch
+    & git merge-base --is-ancestor "$Remote/$targetBranch" HEAD
+    if ($LASTEXITCODE -ne 0) {
+        throw "Remote $targetBranch has commits missing locally. Sync or rebase before retrying."
     }
 
     foreach ($file in $files) {
@@ -138,11 +129,16 @@ try {
     }
 
     Invoke-Git commit -m $Message
-    Invoke-Git push --set-upstream $Remote $targetBranch
+    Invoke-Git push $Remote "HEAD:refs/heads/$targetBranch"
+
+    if ($currentBranch -ne $targetBranch) {
+        Invoke-Git branch -f $targetBranch HEAD
+        Invoke-Git switch $targetBranch
+    }
 
     Write-Host ""
-    Write-Host "Done: committed and pushed to $Remote/$targetBranch" -ForegroundColor Green
-    Write-Host "Create a GitHub Pull Request to merge this branch into $defaultBranch."
+    Write-Host "Done: committed and pushed directly to $Remote/$targetBranch" -ForegroundColor Green
+    Write-Host "No feature branch or Pull Request was created."
 }
 catch {
     Write-Host ""

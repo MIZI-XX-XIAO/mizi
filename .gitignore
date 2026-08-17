@@ -5,6 +5,7 @@ test_output/
 analysis_results/
 analysis_tasks/
 *.csv
+!config/defect_code_catalog.csv
 *.tsv
 *.png
 *.jpg

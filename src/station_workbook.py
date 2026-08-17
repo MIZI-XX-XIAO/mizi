@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 import re
 
+import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 
@@ -231,7 +232,14 @@ def load_station_workbook(path: Path, catalog: StationCatalog) -> StationWorkboo
             .drop_duplicates(["dmc_raw", "station_id", "test_date"], keep="last")
             .drop(columns="_parameter_count")
         )
-    events = events.sort_values(["test_date", "dmc_raw"], na_position="last", kind="stable").reset_index(drop=True)
+    events = events.sort_values(
+        ["station_id", "test_date", "source_sheet", "source_row", "event_id"],
+        na_position="last", kind="stable",
+    ).reset_index(drop=True)
+    # This is the event-level production axis. Rework/retest passes of the same
+    # DMC remain separate instead of being collapsed into one product row.
+    events["production_order"] = events.groupby("station_id").cumcount() + 1
+    events.loc[pd.to_datetime(events["test_date"], errors="coerce").isna(), "production_order"] = pd.NA
     product_columns = ["dmc_raw", "ttnr", "variant", "batch"]
     products = (
         events.sort_values("test_date", na_position="last")
@@ -248,12 +256,18 @@ def enrich_products_with_station_truth(
 ) -> pd.DataFrame:
     """Attach the selected AOI truth and order images by its real MES timestamp."""
     result = products.copy()
+    result["task_order"] = result["global_order"]
     history = workbook.station_events(station_id)
     if history.empty:
         result["truth_match"] = "unmatched"
+        result["event_match_status"] = "ambiguous_event"
+        result["production_order"] = pd.Series(pd.NA, index=result.index, dtype="Int64")
+        has_pair = result.get("has_primary_pair", pd.Series(True, index=result.index)).eq(True)
+        result["evidence_status"] = np.where(has_pair, "ambiguous_event", "unavailable")
         return result
     history = history.sort_values("test_date", na_position="last", kind="stable")
     selected_rows: list[pd.Series] = []
+    match_status: dict[str, str] = {}
     for _, product in result.iterrows():
         candidates = history[history["dmc_raw"].astype(str).eq(str(product["dmc_raw"]))]
         capture = pd.to_datetime(product.get("capture_date"), errors="coerce")
@@ -264,11 +278,25 @@ def enrich_products_with_station_truth(
             if not same_day.empty:
                 candidates = same_day
         if not candidates.empty:
-            selected_rows.append(candidates.iloc[-1])
+            dmc = str(product["dmc_raw"])
+            if len(candidates) == 1:
+                match_status[dmc] = "matched"
+                selected_rows.append(candidates.iloc[0])
+            else:
+                # The filename only contains a date. Multiple same-day passes
+                # cannot be ordered safely, so keep truth for review but exclude
+                # this image from production-sequence pattern fitting.
+                match_status[dmc] = "ambiguous_event"
+                selected = candidates.iloc[-1].copy()
+                selected["production_order"] = pd.NA
+                selected_rows.append(selected)
     latest = pd.DataFrame(selected_rows).drop_duplicates("dmc_raw", keep="last")
     truth_columns = [
         column for column in latest.columns
-        if column in {"dmc_raw", "test_date", "state", "state_raw", "event_id"}
+        if column in {
+            "dmc_raw", "test_date", "state", "state_raw", "event_id",
+            "production_order", "batch", "variant", "ttnr", "source_sheet", "source_row",
+        }
         or any(token in _norm(column) for token in ("failurecode", "overallresultstate"))
     ]
     latest = latest[truth_columns].rename(columns={
@@ -277,6 +305,12 @@ def enrich_products_with_station_truth(
     })
     result = result.merge(latest, on="dmc_raw", how="left")
     result["truth_match"] = result["aoi_event_id"].notna().map({True: "matched", False: "unmatched"})
+    result["event_match_status"] = result["dmc_raw"].astype(str).map(match_status).fillna("unmatched")
+    has_pair = result.get("has_primary_pair", pd.Series(True, index=result.index)).eq(True)
+    result["evidence_status"] = np.where(
+        result["event_match_status"].isin(["ambiguous_event", "unmatched"]), "ambiguous_event",
+        np.where(has_pair, "evaluable", "unavailable"),
+    )
     vi_station_id = {
         "35_5s_aoi": "35_5s_vi", "57_5x_aoi": "57_5x_vi",
         "conveyor_7s_aoi": "conveyor_7s_vi", "conveyor_7x_aoi": "conveyor_7x_vi",

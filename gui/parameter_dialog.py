@@ -22,6 +22,7 @@ INTEGER_FIELDS = {
     "warning_lead_products": (0, 1_000_000),
     "morph_kernel_size": (1, 31), "period_order_tolerance": (0, 1000),
     "missing_order_tolerance": (0, 1000), "preview_count": (0, 1000),
+    "trajectory_min_occurrences": (2, 10_000),
 }
 FLOAT_FIELDS = {
     "region_min_width_ratio": (0.01, 1.0, 3),
@@ -30,6 +31,10 @@ FLOAT_FIELDS = {
     "minimum_period_precision": (0.0, 1.0, 4),
     "minimum_period_coverage": (0.0, 1.0, 4),
     "evaluation_center_tolerance_px": (0.0, 10000.0, 2),
+    "registration_min_score": (0.0, 1.0, 3),
+    "horizontal_y_tolerance_norm": (0.0001, 1.0, 4),
+    "horizontal_min_x_span_norm": (0.0001, 1.0, 4),
+    "linear_drift_min_abs_spearman": (0.0, 1.0, 3),
 }
 
 FIELD_INFO = {
@@ -53,6 +58,11 @@ FIELD_INFO = {
     "missing_order_tolerance": ("缺失确认容差", "片", "超过预测点多少片后确认缺失。", "advanced"),
     "preview_count": ("预览图数量", "张", "任务结束后生成的抽查预览数量。", "advanced"),
     "evaluation_center_tolerance_px": ("评测中心容差", "px", "仅用于带真值评测。", "advanced"),
+    "registration_min_score": ("图像配准最低分", "", "低于该值的轨迹仅作低可信证据。", "advanced"),
+    "horizontal_y_tolerance_norm": ("水平轨迹纵向容差", "", "对齐后归入同一水平带的纵向范围。", "advanced"),
+    "horizontal_min_x_span_norm": ("水平轨迹最小跨度", "", "横向移动达到该比例才判断为平移。", "advanced"),
+    "trajectory_min_occurrences": ("轨迹最少重复次数", "次", "形成空间移动轨迹所需的最少产品数。", "advanced"),
+    "linear_drift_min_abs_spearman": ("单向漂移相关阈值", "", "生产位次与横坐标的最小绝对秩相关。", "advanced"),
 }
 
 DETECTION_FIELDS = {

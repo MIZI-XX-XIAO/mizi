@@ -24,6 +24,11 @@ from .contour_extractor import (
     DETECTION_KEYS, DETECTION_PROFILE_NAMES, EXTRACTED_COLUMNS, extract_product,
     image_scale_to_reference, normalize_analysis_config, read_image,
 )
+from .defect_evidence import (
+    analyze_code_spatial_associations, build_station_attribution,
+    discover_code_patterns, discover_spatial_trajectories,
+    load_defect_catalog, normalize_defect_codes,
+)
 from .pattern_analyzer import OnlinePatternEngine
 
 
@@ -77,6 +82,8 @@ class AnalysisRequest:
     analysis_mode: str = "single_aoi"
     enabled_scopes: tuple[str, ...] = ()
     image_roots: dict[str, Path] = field(default_factory=dict)
+    station_events_frame: pd.DataFrame | None = None
+    defect_catalog_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +187,8 @@ def validate_analysis_request(request: AnalysisRequest) -> tuple[pd.DataFrame, d
         products["analysis_scope"] = products["camera"].astype(str).str.upper()
     if "scope_order" not in products:
         products["scope_order"] = products.groupby("analysis_scope").cumcount() + 1
+    if "task_order" not in products:
+        products["task_order"] = products["global_order"]
     project_root = config_path.parent.parent
     source_column = "v_image_path" if use_legacy else "a_image_path"
     products = products.copy()
@@ -260,6 +269,13 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
         }
         if request.config_path.is_file():
             manifest["input_files"]["config"] = file_fingerprint(request.config_path.resolve())
+        builtin_catalog = project_root / "config" / "defect_code_catalog.csv"
+        if builtin_catalog.is_file():
+            manifest["input_files"]["builtin_defect_catalog"] = file_fingerprint(builtin_catalog.resolve())
+        if request.defect_catalog_path is not None and request.defect_catalog_path.is_file():
+            manifest["input_files"]["custom_defect_catalog"] = file_fingerprint(
+                request.defect_catalog_path.resolve()
+            )
         write_json(work_dir / "task_manifest.json", manifest)
         with (work_dir / "analysis_config_snapshot.yaml").open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
@@ -298,20 +314,44 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
         alert_parts: list[pd.DataFrame] = []
         analyzed_count = 0
         scopes = products["analysis_scope"].drop_duplicates().astype(str).tolist()
-        for scope in scopes:
-            scope_products = products[products["analysis_scope"].astype(str).eq(scope)].copy()
-            order_to_global = dict(zip(scope_products["scope_order"].astype(int), scope_products["global_order"].astype(int)))
+        products["_analysis_station"] = (
+            products["station_id"].fillna("").astype(str)
+            if "station_id" in products else ""
+        )
+        analysis_groups = products.groupby(
+            ["analysis_scope", "_analysis_station"], sort=False, dropna=False
+        )
+        for (scope, station_id), scope_products in analysis_groups:
+            scope = str(scope)
+            station_id = str(station_id)
+            group_prefix = re.sub(r"[^A-Za-z0-9_-]+", "-", station_id or scope)
+            scope_products = scope_products.copy()
+            sequence_column = (
+                "production_order" if "production_order" in scope_products else "scope_order"
+            )
+            sequence_values = pd.to_numeric(scope_products[sequence_column], errors="coerce")
+            sequence_products = scope_products[sequence_values.notna()].copy()
+            sequence_products[sequence_column] = pd.to_numeric(
+                sequence_products[sequence_column], errors="raise"
+            ).astype(int)
+            order_to_global = dict(zip(
+                sequence_products[sequence_column].astype(int), sequence_products["global_order"].astype(int)
+            ))
             global_to_scope = {value: key for key, value in order_to_global.items()}
-            engine_products = scope_products.copy()
-            engine_products["global_order"] = engine_products["scope_order"].astype(int)
+            engine_products = sequence_products.copy()
+            engine_products["global_order"] = engine_products[sequence_column].astype(int)
             scope_detections = extracted[extracted["global_order"].isin(global_to_scope)].copy()
             scope_detections["global_order"] = scope_detections["global_order"].map(global_to_scope)
 
-            def scoped_alert(alert: dict[str, Any], scope_name: str = scope) -> None:
+            def scoped_alert(
+                alert: dict[str, Any], scope_name: str = scope,
+                station_name: str = station_id, prefix: str = group_prefix,
+            ) -> None:
                 item = dict(alert)
                 item["analysis_scope"] = scope_name
-                item["alert_id"] = f"{scope_name}-{item['alert_id']}"
-                item["cluster_id"] = f"{scope_name}-{item['cluster_id']}"
+                item["station_id"] = station_name
+                item["alert_id"] = f"{prefix}-{item['alert_id']}"
+                item["cluster_id"] = f"{prefix}-{item['cluster_id']}"
                 callbacks.on_alert(item)
 
             engine = OnlinePatternEngine(config, alert_callback=scoped_alert)
@@ -328,27 +368,42 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
                 cancel_check=lambda: token.is_cancelled,
             )
             analyzed_count += len(scope_products)
+            # Image evidence without a reliable MES event is retained for review,
+            # but cannot contribute to temporal patterns.
+            unsequenced = extracted[
+                extracted["global_order"].isin(scope_products["global_order"])
+                & ~extracted["global_order"].isin(global_to_scope)
+            ].copy()
             scope_assigned["global_order"] = scope_assigned["global_order"].map(order_to_global)
+            if not unsequenced.empty:
+                scope_assigned = pd.concat([scope_assigned, unsequenced], ignore_index=True)
             scope_assigned["analysis_scope"] = scope
+            scope_assigned["station_id"] = station_id
             if "cluster_id" in scope_assigned:
                 mask = scope_assigned["cluster_id"].astype(str).str.strip().ne("")
-                scope_assigned.loc[mask, "cluster_id"] = scope + "-" + scope_assigned.loc[mask, "cluster_id"].astype(str)
+                scope_assigned.loc[mask, "cluster_id"] = group_prefix + "-" + scope_assigned.loc[mask, "cluster_id"].astype(str)
             for frame in (scope_clusters, scope_patterns, scope_alerts):
                 frame["analysis_scope"] = scope
+                frame["station_id"] = station_id
                 if not frame.empty and "cluster_id" in frame:
-                    frame["cluster_id"] = scope + "-" + frame["cluster_id"].astype(str)
+                    frame["cluster_id"] = group_prefix + "-" + frame["cluster_id"].astype(str)
             if not scope_patterns.empty:
-                scope_patterns["pattern_id"] = scope + "-" + scope_patterns["pattern_id"].astype(str)
+                scope_patterns["pattern_id"] = group_prefix + "-" + scope_patterns["pattern_id"].astype(str)
+                scope_patterns["phase_start_production_order"] = scope_patterns["phase_start"]
+                scope_patterns["observed_production_orders"] = scope_patterns["observed_orders"]
+                scope_patterns["missing_production_orders"] = scope_patterns["inferred_missing_orders"]
                 for column in ("first_order", "last_order", "confirmed_at_order", "next_expected_order"):
                     if column in scope_patterns:
                         scope_patterns[column] = scope_patterns[column].map(order_to_global)
+                if "phase_start" in scope_patterns:
+                    scope_patterns["phase_start"] = scope_patterns["phase_start"].map(order_to_global)
                 for column in ("observed_orders", "inferred_missing_orders"):
                     if column in scope_patterns:
                         scope_patterns[column] = scope_patterns[column].map(
                             lambda value: _map_order_list(value, order_to_global)
                         )
             if not scope_alerts.empty:
-                scope_alerts["alert_id"] = scope + "-" + scope_alerts["alert_id"].astype(str)
+                scope_alerts["alert_id"] = group_prefix + "-" + scope_alerts["alert_id"].astype(str)
                 for column in ("alert_at_order", "predicted_order"):
                     if column in scope_alerts:
                         scope_alerts[column] = scope_alerts[column].map(order_to_global)
@@ -360,10 +415,31 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
             cluster_parts.append(scope_clusters)
             pattern_parts.append(scope_patterns)
             alert_parts.append(scope_alerts)
+        products = products.drop(columns="_analysis_station")
         assigned = pd.concat(assigned_parts, ignore_index=True) if assigned_parts else pd.DataFrame(columns=EXTRACTED_COLUMNS)
         clusters = pd.concat(cluster_parts, ignore_index=True) if cluster_parts else pd.DataFrame()
         patterns = pd.concat(pattern_parts, ignore_index=True) if pattern_parts else pd.DataFrame()
         alerts = pd.concat(alert_parts, ignore_index=True) if alert_parts else pd.DataFrame()
+        catalog = load_defect_catalog(
+            project_root / "config" / "defect_code_catalog.csv", request.defect_catalog_path
+        )
+        station_events = (
+            request.station_events_frame.copy()
+            if request.station_events_frame is not None else products.copy()
+        )
+        normalized_codes = normalize_defect_codes(station_events, catalog)
+        if not normalized_codes.empty and scopes:
+            normalized_codes = normalized_codes[
+                normalized_codes["analysis_scope"].astype(str).isin(scopes)
+            ].reset_index(drop=True)
+        code_patterns = discover_code_patterns(normalized_codes, config)
+        assigned, trajectories = discover_spatial_trajectories(products, assigned, config)
+        code_space, code_conflicts = analyze_code_spatial_associations(
+            products, normalized_codes, assigned
+        )
+        station_attribution = build_station_attribution(
+            code_patterns, trajectories, code_space, products, assigned
+        )
         if token.is_cancelled:
             raise InterruptedError("用户取消")
         callbacks.on_stage("WRITING")
@@ -372,6 +448,14 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
         clusters.to_csv(work_dir / "spatial_clusters.csv", index=False, encoding="utf-8-sig")
         patterns.to_csv(work_dir / "discovered_patterns.csv", index=False, encoding="utf-8-sig")
         alerts.to_csv(work_dir / "alerts.csv", index=False, encoding="utf-8-sig")
+        normalized_codes.to_csv(work_dir / "normalized_defect_codes.csv", index=False, encoding="utf-8-sig")
+        catalog.frame.to_csv(work_dir / "defect_code_catalog_snapshot.csv", index=False, encoding="utf-8-sig")
+        catalog.issues.to_csv(work_dir / "defect_code_catalog_issues.csv", index=False, encoding="utf-8-sig")
+        code_patterns.to_csv(work_dir / "code_patterns.csv", index=False, encoding="utf-8-sig")
+        trajectories.to_csv(work_dir / "spatial_trajectories.csv", index=False, encoding="utf-8-sig")
+        code_space.to_csv(work_dir / "code_spatial_associations.csv", index=False, encoding="utf-8-sig")
+        code_conflicts.to_csv(work_dir / "code_label_conflicts.csv", index=False, encoding="utf-8-sig")
+        station_attribution.to_csv(work_dir / "station_attribution.csv", index=False, encoding="utf-8-sig")
         scopes_root = work_dir / "scopes"
         for scope in scopes:
             scope_dir = scopes_root / scope
@@ -382,6 +466,11 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
             for filename, frame in (
                 ("extracted_defects.csv", assigned), ("spatial_clusters.csv", clusters),
                 ("discovered_patterns.csv", patterns), ("alerts.csv", alerts),
+                ("normalized_defect_codes.csv", normalized_codes), ("code_patterns.csv", code_patterns),
+                ("spatial_trajectories.csv", trajectories),
+                ("code_spatial_associations.csv", code_space),
+                ("code_label_conflicts.csv", code_conflicts),
+                ("station_attribution.csv", station_attribution),
             ):
                 scoped = (
                     frame[frame["analysis_scope"].astype(str).eq(scope)]
@@ -398,6 +487,12 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
             "periodic_pattern_count": int((patterns.pattern_type == "periodic").sum()) if not patterns.empty else 0,
             "burst_pattern_count": int((patterns.pattern_type == "burst").sum()) if not patterns.empty else 0,
             "alert_count": len(alerts), "elapsed_seconds": round(perf_counter() - started, 3),
+            "normalized_code_event_count": len(normalized_codes),
+            "code_pattern_count": len(code_patterns), "spatial_trajectory_count": len(trajectories),
+            "code_spatial_association_count": len(code_space),
+            "code_label_conflict_count": int(
+                code_conflicts.get("comparison_status", pd.Series(dtype=str)).eq("label_conflict").sum()
+            ),
             "truth_labels_used": False, "application_version": APP_VERSION,
             "algorithm_version": ALGORITHM_VERSION,
             "analysis_mode": request.analysis_mode,
@@ -448,11 +543,19 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
         callbacks.on_progress(ProgressEvent("COMPLETE", None, total, total, 100, len(assigned)))
         return AnalysisResult("complete", final_dir, summary, {
             "products": display_products, "extracted": assigned, "clusters": clusters,
-            "patterns": patterns, "alerts": alerts,
+            "patterns": patterns, "alerts": alerts, "normalized_codes": normalized_codes,
+            "code_patterns": code_patterns, "trajectories": trajectories,
+            "code_space": code_space, "code_conflicts": code_conflicts,
+            "station_attribution": station_attribution, "defect_catalog": catalog.frame,
         })
     except InterruptedError:
-        for filename in ("extracted_defects.csv", "spatial_clusters.csv", "discovered_patterns.csv",
-                         "alerts.csv", "analysis_summary.json"):
+        for filename in (
+            "extracted_defects.csv", "spatial_clusters.csv", "discovered_patterns.csv",
+            "alerts.csv", "normalized_defect_codes.csv", "defect_code_catalog_snapshot.csv",
+            "defect_code_catalog_issues.csv", "code_patterns.csv", "spatial_trajectories.csv",
+            "code_spatial_associations.csv", "code_label_conflicts.csv",
+            "station_attribution.csv", "analysis_summary.json",
+        ):
             (work_dir / filename).unlink(missing_ok=True)
         if (work_dir / "visualizations").exists():
             shutil.rmtree(work_dir / "visualizations")

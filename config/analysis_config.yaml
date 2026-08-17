@@ -24,6 +24,13 @@ burst_minimum_length: 4
 missing_order_tolerance: 0
 warning_lead_products: 3
 
+# 产品对齐和水平轨迹发现。
+registration_min_score: 0.80
+horizontal_y_tolerance_norm: 0.02
+horizontal_min_x_span_norm: 0.05
+trajectory_min_occurrences: 4
+linear_drift_min_abs_spearman: 0.80
+
 evaluation_center_tolerance_px: 10.0
 output_directory: "analysis_results"
 preview_count: 8

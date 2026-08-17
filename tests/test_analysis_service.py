@@ -163,3 +163,34 @@ def test_multi_scope_analysis_is_isolated_and_writes_scope_outputs(tmp_path: Pat
     for scope in ("5S", "5X"):
         assert (result.output_dir / "scopes" / scope / "products.csv").is_file()
         assert (result.output_dir / "scopes" / scope / "extracted_defects.csv").is_file()
+
+
+def test_task_writes_code_and_spatial_evidence_outputs(tmp_path: Path) -> None:
+    products_path = _subset_products(tmp_path, 5)
+    events = pd.DataFrame([
+        {"event_id": f"A{order}", "dmc_raw": f"DMC-{order:03d}",
+         "station_id": "35_5s_aoi", "test_date": f"2026-06-10 10:0{order}:00",
+         "state": "NOK", "source_sheet": "AOI", "source_row": order + 1,
+         "production_order": order, "Result.AOIFailureCode": "501100000000"}
+        for order in range(1, 6)
+    ] + [
+        {"event_id": f"V{order}", "dmc_raw": f"DMC-{order:03d}",
+         "station_id": "35_5s_vi", "test_date": f"2026-06-10 11:0{order}:00",
+         "state": "NOK", "source_sheet": "MS0335all", "source_row": order + 1,
+         "production_order": order, "BlockCode": "175011_" if order < 5 else "175520_"}
+        for order in range(1, 6)
+    ])
+    result = run_analysis_task(AnalysisRequest(
+        products_path, PROJECT_ROOT / "config/analysis_config.yaml", tmp_path, "证据融合",
+        station_events_frame=events,
+    ))
+    for filename in (
+        "normalized_defect_codes.csv", "defect_code_catalog_snapshot.csv", "code_patterns.csv",
+        "spatial_trajectories.csv", "code_spatial_associations.csv", "code_label_conflicts.csv",
+        "station_attribution.csv",
+    ):
+        assert (result.output_dir / filename).is_file()
+    assert result.summary["normalized_code_event_count"] == 10
+    assert not result.frames["code_patterns"].empty
+    conflict = result.frames["code_conflicts"]
+    assert conflict.loc[conflict.dmc_raw.eq("DMC-005"), "comparison_status"].iloc[0] == "label_conflict"

@@ -13,7 +13,7 @@ import psutil
 import yaml
 from PySide6.QtCore import QDateTime, QSettings, QThread, QTimer, Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStatusBar,
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
@@ -25,6 +25,7 @@ from src.analysis_service import (
 from src.app_runtime import APP_VERSION, configure_logging, new_error_id, user_data_dir
 from src.data_quality import DataQualityReport, validate_products
 from src.defect_relationships import analyze_defect_relationships
+from src.defect_evidence import discover_code_patterns
 from src.process_relationships import analyze_process_relationships
 from .image_viewer import ImageReviewWidget
 from .analysis_worker import AnalysisWorker
@@ -218,6 +219,13 @@ class MainWindow(QMainWindow):
             ), True, "YAML (*.yaml *.yml)"
         )
         form.addRow("分析配置", row)
+        self.catalog_edit, row = self._path_row(
+            self._saved_path(
+                "paths/defect_catalog", self.project_root / "config/defect_code_catalog.csv"
+            ), True, "缺陷字典 (*.csv *.xlsx *.xlsm)"
+        )
+        self.catalog_edit.setPlaceholderText("可选；按layer+code+region覆盖内置缺陷名称")
+        form.addRow("缺陷代码字典", row)
         self.products_edit, row = self._path_row("", True, "CSV (*.csv)")
         self.products_edit.setPlaceholderText("仅用于旧数据集/开发验收，公司日常任务无需填写")
         form.addRow("旧版产品CSV（可选）", row)
@@ -337,6 +345,8 @@ class MainWindow(QMainWindow):
             ("region_anomaly_count", "区域异常"),
             ("spatial_cluster_count", "空间簇"), ("discovered_pattern_count", "发现规律"),
             ("periodic_pattern_count", "周期规律"), ("burst_pattern_count", "连续异常"),
+            ("code_pattern_count", "代码规律"), ("spatial_trajectory_count", "水平轨迹"),
+            ("code_label_conflict_count", "标签冲突"),
             ("alert_count", "告警数量"), ("elapsed_seconds", "耗时（秒）"),
         )
         for index, (key, caption) in enumerate(items):
@@ -392,6 +402,30 @@ class MainWindow(QMainWindow):
         filters.addWidget(self.time_end, 1, 4)
         filters.setColumnStretch(5, 1)
         layout.addLayout(filters)
+        evidence_filters = QGridLayout()
+        self.evidence_mode = QComboBox()
+        self.evidence_mode.addItem("空间规律", "space")
+        self.evidence_mode.addItem("代码规律", "code")
+        self.evidence_mode.addItem("代码+空间联合", "joint")
+        self.code_source_filter = QComboBox()
+        self.code_source_filter.addItem("AOI与VI对照", "all")
+        self.code_source_filter.addItem("仅AOI", "AOI_FAILURE")
+        self.code_source_filter.addItem("仅VI", "VI_BLOCK")
+        self.code_list = QListWidget()
+        self.code_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.code_list.setMaximumHeight(90)
+        self.merge_selected_codes = QCheckBox("合并所选代码为缺陷族")
+        self.evidence_mode.currentIndexChanged.connect(self._apply_global_filters)
+        self.code_source_filter.currentIndexChanged.connect(self._apply_global_filters)
+        self.code_list.itemSelectionChanged.connect(self._apply_global_filters)
+        self.merge_selected_codes.toggled.connect(self._apply_global_filters)
+        evidence_filters.addWidget(QLabel("规律证据"), 0, 0)
+        evidence_filters.addWidget(self.evidence_mode, 0, 1)
+        evidence_filters.addWidget(self.code_source_filter, 0, 2)
+        evidence_filters.addWidget(self.merge_selected_codes, 0, 3)
+        evidence_filters.addWidget(QLabel("缺陷代码（可多选）"), 1, 0)
+        evidence_filters.addWidget(self.code_list, 1, 1, 1, 4)
+        layout.addLayout(evidence_filters)
         self.pattern_widget = DataFrameTableWidget("patterns")
         self.pattern_widget.row_activated.connect(self._jump_from_pattern)
         self.alert_widget = DataFrameTableWidget("alerts", alert_colors=True)
@@ -440,10 +474,18 @@ class MainWindow(QMainWindow):
         self.relationship_metrics = DataFrameTableWidget("process_metrics")
         self.relationship_bins = DataFrameTableWidget("process_bins")
         self.relationship_model = DataFrameTableWidget("process_model")
+        self.code_space_widget = DataFrameTableWidget("code_space_associations")
+        self.code_conflict_widget = DataFrameTableWidget("code_label_conflicts")
+        self.trajectory_widget = DataFrameTableWidget("spatial_trajectories")
+        self.attribution_widget = DataFrameTableWidget("station_attribution")
         tables = QTabWidget()
         tables.addTab(self.relationship_metrics, "统计与效应量")
         tables.addTab(self.relationship_bins, "区间缺陷率")
         tables.addTab(self.relationship_model, "模型重要性")
+        tables.addTab(self.code_space_widget, "代码—空间关联")
+        tables.addTab(self.code_conflict_widget, "AOI—VI一致性")
+        tables.addTab(self.trajectory_widget, "水平轨迹")
+        tables.addTab(self.attribution_widget, "工站归因证据")
         layout.addWidget(title)
         layout.addWidget(warning)
         layout.addLayout(controls)
@@ -623,12 +665,14 @@ class MainWindow(QMainWindow):
                 self.loaded_products = pd.concat(product_parts, ignore_index=True) if product_parts else pd.DataFrame()
                 if not self.loaded_products.empty:
                     self.loaded_products["global_order"] = range(1, len(self.loaded_products) + 1)
+                    self.loaded_products["task_order"] = self.loaded_products["global_order"]
                 self._station_issues = pd.concat(issue_parts, ignore_index=True) if issue_parts else pd.DataFrame()
                 self.analysis_products = self.loaded_products[
                     self.loaded_products.get("has_primary_pair", False).eq(True)
                 ].copy() if not self.loaded_products.empty else pd.DataFrame()
                 if not self.analysis_products.empty:
                     self.analysis_products["global_order"] = range(1, len(self.analysis_products) + 1)
+                    self.analysis_products["task_order"] = self.analysis_products["global_order"]
                 report = DataQualityReport("全流程任务", len(self.loaded_products), len(self.loaded_products.columns))
                 report.warnings.extend(station_warnings)
                 if excel_data is not None:
@@ -747,6 +791,13 @@ class MainWindow(QMainWindow):
                     scope: Path(edit.text().strip()) for scope, edit in self.scope_image_edits.items()
                     if edit.text().strip()
                 },
+                station_events_frame=(
+                    self.station_workbook.events if self.station_workbook is not None else None
+                ),
+                defect_catalog_path=(
+                    Path(self.catalog_edit.text().strip())
+                    if hasattr(self, "catalog_edit") and self.catalog_edit.text().strip() else None
+                ),
             )
             self._auto_relationship_pending = excel_path is not None
         except Exception as exc:
@@ -827,6 +878,23 @@ class MainWindow(QMainWindow):
         self._transition_frame = transitions
         self.cooccurrence_widget.set_frame(cooccurrence)
         self.transition_widget.set_frame(transitions)
+        self.code_space_widget.set_frame(result.frames.get("code_space", pd.DataFrame()))
+        self.code_conflict_widget.set_frame(result.frames.get("code_conflicts", pd.DataFrame()))
+        self.trajectory_widget.set_frame(result.frames.get("trajectories", pd.DataFrame()))
+        self.attribution_widget.set_frame(result.frames.get("station_attribution", pd.DataFrame()))
+        self.code_list.blockSignals(True)
+        self.code_list.clear()
+        normalized_codes = result.frames.get("normalized_codes", pd.DataFrame())
+        if not normalized_codes.empty:
+            defect_codes = normalized_codes[
+                normalized_codes["code_status"].isin(["defect", "state_code_conflict"])
+            ][["canonical_code", "defect_name"]].drop_duplicates()
+            for row in defect_codes.sort_values("canonical_code").itertuples(index=False):
+                caption = str(row.canonical_code)
+                if str(row.defect_name).strip():
+                    caption += f"  {row.defect_name}"
+                self.code_list.addItem(caption)
+        self.code_list.blockSignals(False)
         cooccurrence.to_csv(
             result.output_dir / "defect_cooccurrence.csv", index=False, encoding="utf-8-sig"
         )
@@ -994,6 +1062,60 @@ class MainWindow(QMainWindow):
             alerts = alerts[
                 pd.to_numeric(alerts.alert_at_order, errors="coerce").fillna(-1).astype(int).isin(orders)
             ]
+        selected_codes = {
+            item.text().split()[0] for item in self.code_list.selectedItems()
+        } if hasattr(self, "code_list") else set()
+        source = self.code_source_filter.currentData() if hasattr(self, "code_source_filter") else "all"
+        evidence_mode = self.evidence_mode.currentData() if hasattr(self, "evidence_mode") else "space"
+        if evidence_mode == "code":
+            if selected_codes and self.merge_selected_codes.isChecked():
+                patterns = discover_code_patterns(
+                    frames.get("normalized_codes", pd.DataFrame()), self._result_config,
+                    selected_codes, merge_selected=True,
+                )
+            else:
+                patterns = frames.get("code_patterns", pd.DataFrame()).copy()
+                if selected_codes and not patterns.empty:
+                    patterns = patterns[patterns["canonical_code"].astype(str).isin(selected_codes)]
+            if source != "all" and not patterns.empty:
+                patterns = patterns[patterns["source_type"].astype(str).eq(str(source))]
+            if scope and scope != "全部范围" and not patterns.empty:
+                patterns = patterns[patterns["analysis_scope"].astype(str).eq(scope)]
+        elif evidence_mode == "joint":
+            patterns = frames.get("code_space", pd.DataFrame()).copy()
+            if selected_codes and not patterns.empty:
+                patterns = patterns[patterns["canonical_code"].astype(str).isin(selected_codes)]
+            if source != "all" and not patterns.empty:
+                patterns = patterns[patterns["source_type"].astype(str).eq(str(source))]
+            if scope and scope != "全部范围" and not patterns.empty:
+                patterns = patterns[patterns["analysis_scope"].astype(str).eq(scope)]
+        code_space = frames.get("code_space", pd.DataFrame()).copy()
+        if selected_codes and not code_space.empty:
+            code_space = code_space[code_space["canonical_code"].astype(str).isin(selected_codes)]
+        if source != "all" and not code_space.empty:
+            code_space = code_space[code_space["source_type"].astype(str).eq(str(source))]
+        if scope and scope != "全部范围" and not code_space.empty:
+            code_space = code_space[code_space["analysis_scope"].astype(str).eq(scope)]
+        conflicts = frames.get("code_conflicts", pd.DataFrame()).copy()
+        trajectories = frames.get("trajectories", pd.DataFrame()).copy()
+        attribution = frames.get("station_attribution", pd.DataFrame()).copy()
+        if scope and scope != "全部范围":
+            for frame_name, frame in (
+                ("conflicts", conflicts), ("trajectories", trajectories),
+                ("attribution", attribution),
+            ):
+                if not frame.empty and "analysis_scope" in frame:
+                    filtered = frame[frame["analysis_scope"].astype(str).eq(scope)]
+                    if frame_name == "conflicts":
+                        conflicts = filtered
+                    elif frame_name == "trajectories":
+                        trajectories = filtered
+                    else:
+                        attribution = filtered
+        self.code_space_widget.set_frame(code_space)
+        self.code_conflict_widget.set_frame(conflicts)
+        self.trajectory_widget.set_frame(trajectories)
+        self.attribution_widget.set_frame(attribution)
         self.pattern_widget.set_frame(patterns)
         self.alert_widget.set_frame(alerts)
         cooccurrence = getattr(self, "_cooccurrence_frame", pd.DataFrame()).copy()
@@ -1094,6 +1216,34 @@ class MainWindow(QMainWindow):
                     if "analysis_scope" in extracted_frame else extracted_frame
                 )
                 targets: list[tuple[str, pd.DataFrame]] = [("图片算法检出", scope_defects)]
+                normalized = self.current_result.frames.get("normalized_codes", pd.DataFrame())
+                if not normalized.empty:
+                    scope_codes = normalized[
+                        normalized["analysis_scope"].astype(str).eq(str(scope))
+                        & normalized["code_status"].isin(["defect", "state_code_conflict"])
+                    ]
+                    for (source_type, code), code_group in scope_codes.groupby(
+                        ["source_type", "canonical_code"]
+                    ):
+                        dmcs = set(code_group["dmc_raw"].astype(str))
+                        orders = scope_products.loc[
+                            scope_products["dmc_raw"].astype(str).isin(dmcs), "global_order"
+                        ]
+                        if len(orders) >= 4:
+                            targets.append((
+                                f"{source_type}_{code}",
+                                pd.DataFrame({"global_order": orders, "component_area": 1}),
+                            ))
+                if "trajectory_id" in scope_defects:
+                    for trajectory_id, trajectory_group in scope_defects[
+                        scope_defects["trajectory_id"].fillna("").astype(str).str.strip().ne("")
+                    ].groupby("trajectory_id"):
+                        orders = trajectory_group["global_order"].drop_duplicates()
+                        if len(orders) >= 4:
+                            targets.append((
+                                f"TRAJECTORY_{trajectory_id}",
+                                pd.DataFrame({"global_order": orders, "component_area": 1}),
+                            ))
                 for label, column, expected in (
                     ("AOI_NOK", "aoi_state", "NOK"), ("VI_NOK", "vi_state", "NOK"),
                 ):
@@ -1169,6 +1319,7 @@ class MainWindow(QMainWindow):
     def _save_settings(self) -> None:
         for key, value in (
             ("paths/products", self.products_edit.text()), ("paths/config", self.config_edit.text()),
+            ("paths/defect_catalog", self.catalog_edit.text()),
             ("paths/source_excel", self.source_excel_edit.text()),
             ("paths/output", self.output_edit.text()), ("paths/image_root", self.image_root_edit.text()),
             ("paths/process", self.process_edit.text()), ("task/name", self.task_edit.text()),

@@ -1,7 +1,7 @@
 """本文件增量分析缺陷的空间重复、周期规律和连续异常，并生成逐片预警事件。"""
 
 from dataclasses import dataclass, field
-from math import floor, hypot
+from math import hypot
 from typing import Any, Callable
 
 import pandas as pd
@@ -26,12 +26,14 @@ class SpatialCluster:
         self.points.append((x, y)); self.orders.append(order)
 
 
-def fit_period(orders: list[int], config: dict[str, Any]) -> dict[str, Any] | None:
+def fit_period(orders: list[int], config: dict[str, Any],
+               eligible_orders: list[int] | None = None) -> dict[str, Any] | None:
     """Find the fundamental period by precision and expected-slot coverage."""
     values = sorted(set(map(int, orders)))
     if len(values) < int(config["minimum_repeat_occurrences"]):
         return None
     best: dict[str, Any] | None = None
+    eligible = set(map(int, eligible_orders)) if eligible_orders is not None else None
     tolerance = int(config["period_order_tolerance"])
     for period in range(int(config["minimum_period"]), int(config["maximum_period"]) + 1):
         residues = sorted({value % period for value in values})
@@ -40,7 +42,10 @@ def fit_period(orders: list[int], config: dict[str, Any]) -> dict[str, Any] | No
             if len(matched) < int(config["minimum_repeat_occurrences"]):
                 continue
             first, last = min(matched), max(matched)
-            expected_slots = floor((last - first) / period) + 1
+            expected = list(range(first, last + 1, period))
+            expected_slots = len(expected) if eligible is None else sum(order in eligible for order in expected)
+            if expected_slots == 0:
+                continue
             precision = len(matched) / len(values)
             coverage = min(1.0, len(matched) / expected_slots)
             confidence = 2 * precision * coverage / (precision + coverage) if precision + coverage else 0.0
@@ -122,6 +127,7 @@ class OnlinePatternEngine:
         lead = int(self.config["warning_lead_products"])
         miss_tolerance = int(self.config["missing_order_tolerance"])
         ordered_products = products.sort_values("global_order")["global_order"].astype(int).tolist()
+        eligible_orders = set(ordered_products)
         for processed, current_order in enumerate(ordered_products, 1):
             if cancel_check is not None and cancel_check():
                 raise InterruptedError("analysis cancelled")
@@ -135,6 +141,9 @@ class OnlinePatternEngine:
             for cluster_id, active in list(self.active_periods.items()):
                 cluster = next(item for item in self.clusters if item.cluster_id == cluster_id)
                 predicted = int(active["next_expected_order"])
+                while predicted <= ordered_products[-1] and predicted not in eligible_orders:
+                    active["next_expected_order"] = predicted + int(active["period"])
+                    predicted = int(active["next_expected_order"])
                 if current_order == predicted and current_order in cluster.unique_orders:
                     active["next_expected_order"] = predicted + int(active["period"])
                     predicted = int(active["next_expected_order"])
@@ -156,7 +165,10 @@ class OnlinePatternEngine:
                     self.burst_alerted.add(cluster.cluster_id)
                     self._alert(current_order, "burst_detected", cluster, "critical", 1.0, None, run,
                                 f"Defect repeated for {len(run)} consecutive products")
-                fit = fit_period(cluster.unique_orders, self.config)
+                fit = fit_period(
+                    cluster.unique_orders, self.config,
+                    [order for order in ordered_products if order <= current_order],
+                )
                 if fit and cluster.cluster_id not in self.active_periods:
                     next_order = int(fit["phase_start"])
                     while next_order <= current_order: next_order += int(fit["period"])
@@ -185,7 +197,7 @@ class OnlinePatternEngine:
             center_x, center_y = cluster.center
             orders = cluster.unique_orders
             run = longest_consecutive_run(orders)
-            fit = fit_period(orders, self.config)
+            fit = fit_period(orders, self.config, ordered_products)
             cluster_rows.append({
                 "cluster_id": cluster.cluster_id, "center_x_norm": round(center_x, 7),
                 "center_y_norm": round(center_y, 7), "detection_count": len(cluster.points),
@@ -194,7 +206,12 @@ class OnlinePatternEngine:
             })
             if fit:
                 active = self.active_periods.get(cluster.cluster_id, {})
-                expected = list(range(int(fit["phase_start"]), max(orders) + 1, int(fit["period"])))
+                eligible = set(ordered_products)
+                expected = [
+                    order for order in range(
+                        int(fit["phase_start"]), max(orders) + 1, int(fit["period"])
+                    ) if order in eligible
+                ]
                 missing = sorted(set(expected) - set(fit["matched_orders"]))
                 pattern_rows.append({
                     "pattern_id": f"P{len(pattern_rows) + 1:03d}", "pattern_type": "periodic",

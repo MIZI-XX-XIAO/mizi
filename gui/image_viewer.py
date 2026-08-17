@@ -442,19 +442,28 @@ class ImageReviewWidget(QWidget):
         self.pattern_list.blockSignals(True)
         for order in sorted(set(observed + missing)):
             status = "missing" if order in missing else "observed"
-            caption = f"#{order}\n" + ("周期缺失" if status == "missing" else "规律命中")
+            matches = self.products[self.products.global_order.astype(int).eq(order)]
+            product = matches.iloc[0] if not matches.empty else pd.Series(dtype=object)
+            if str(product.get("evidence_status", "")) in {"unavailable", "ambiguous_event"}:
+                status = "unavailable"
+            production = product.get("production_order")
+            production_text = "—" if pd.isna(production) else str(int(float(production)))
+            status_text = {"missing": "周期缺失", "observed": "规律命中", "unavailable": "无法判定"}[status]
+            caption = f"生产 #{production_text} / 任务 #{order}\n{status_text}"
             item = QListWidgetItem(caption)
             item.setData(Qt.UserRole, order)
             item.setData(Qt.UserRole + 1, status)
             item.setTextAlignment(Qt.AlignCenter)
             item.setSizeHint(QSize(154, 112))
-            if status == "missing":
+            if status in {"missing", "unavailable"}:
                 item.setBackground(QBrush(QColor("#e5e7eb")))
                 item.setForeground(QBrush(QColor("#4b5563")))
-                item.setToolTip("该周期位置预期出现规律缺陷，但算法未检出")
+                item.setToolTip(
+                    "缺少有效图片或无法唯一匹配MES事件，不计为周期缺失"
+                    if status == "unavailable" else "该周期位置图片有效，但算法未检出规律缺陷"
+                )
             else:
                 item.setBackground(QBrush(QColor("#eef6ff")))
-            matches = self.products[self.products.global_order.astype(int).eq(order)]
             if not matches.empty:
                 path = str(matches.iloc[0].get("e_image_path", ""))
                 if path and Path(path).is_file():
@@ -746,12 +755,16 @@ class ImageReviewWidget(QWidget):
         product = self.products[self.products.global_order == self.current_order].iloc[0]
         rows = self.detections[self.detections.global_order == self.current_order]
         lines = [
-            f"<b>产品序号：</b>{self.current_order}",
+            f"<b>任务序号：</b>{product.get('task_order', self.current_order)}",
+            f"<b>生产位次：</b>{product.get('production_order', '—')}",
             f"<b>分析范围：</b>{product.get('analysis_scope', product.get('camera', '-'))}",
             f"<b>Ident No.：</b>{product.get('dmc_raw', product.get('order_code', '-'))}",
             f"<b>产品编码：</b>{product.get('order_code', '-')}",
             f"<b>相机：</b>{product.get('camera', '-')}",
             f"<b>批次：</b>{product.get('batch', product.get('batch_id', '-'))}",
+            f"<b>证据状态：</b>{product.get('evidence_status', 'evaluable')}",
+            f"<b>AOI代码：</b>{product.get('aoi_failure_code', product.get('Result.AOIFailureCode', '-'))}",
+            f"<b>VI代码：</b>{product.get('vi_defect_code', '-')}",
             f"<b>缺陷数量：</b>{len(rows)}",
         ]
         aoi_state = str(product.get("aoi_state", "") or "未匹配")

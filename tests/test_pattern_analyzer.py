@@ -23,6 +23,21 @@ def test_period_fit_prefers_24_over_divisors_and_tolerates_missing() -> None:
     assert result["phase_start"] == 13
 
 
+def test_unavailable_product_position_is_not_counted_as_period_missing() -> None:
+    products = pd.DataFrame({"global_order": [order for order in range(1, 26) if order != 19]})
+    defect_orders = [1, 7, 13, 25]
+    detections = pd.DataFrame([
+        {"detected_id": f"X{index:04d}", "global_order": order,
+         "center_x_norm": 0.4, "center_y_norm": 0.4, "cluster_id": ""}
+        for index, order in enumerate(defect_orders, 1)
+    ])
+    _, _, patterns, alerts = OnlinePatternEngine(_config()).process(products, detections)
+    periodic = patterns[patterns.pattern_type.eq("periodic")].iloc[0]
+    assert int(periodic.period) == 6
+    assert periodic.inferred_missing_orders == ""
+    assert alerts[alerts.alert_type.eq("expected_occurrence_missing")].empty
+
+
 def test_online_replay_discovers_period_burst_and_warnings() -> None:
     config = _config()
     products = pd.DataFrame({"global_order": range(1, 501)})

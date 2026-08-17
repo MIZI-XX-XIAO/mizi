@@ -10,7 +10,7 @@
 1. 新建任务：选择工站、Excel工作簿、图片根目录、结果目录和分析参数。
 2. 数据检查：校验Excel的Location(s)，并检查DMC匹配、多视图覆盖、重复图和缺图。
 3. 执行分析：后台提取缺陷并显示进度、资源使用、预计时间和实时告警。
-4. 结果概览：查看规律、预警、缺陷共现和序列关系，支持筛选、排序、搜索和导出。
+4. 结果概览：分别查看代码规律、图片空间规律或二者联合规律，支持AOI/VI来源、单个或多个缺陷代码筛选。
 5. Excel分析：读取测试工作簿，统计State、Tolerance超差、判定冲突、趋势和分组质量。
 6. 关联分析：分析数值工艺参数与图片缺陷之间的相关性、效应量、区间缺陷率和模型重要性。
 7. 图片复核：查看 A图、E图、差异图和Mask，支持检测框、同步缩放拖动、缺陷导航及局部原图。
@@ -26,6 +26,8 @@
 工艺参数 CSV 应包含 `product_id`、`order_code`、`dmc_raw` 或 `global_order` 之一进行精确关联。没有共同产品键时，可使用 `production_timestamp` 或 `timestamp` 按界面容差就近匹配。其他数值列作为工艺参数参与分析。统计关联不代表因果关系。
 
 Excel质量分析支持`.xlsx`和`.xlsm`，并按工站分为WP、AOI、VI三种分析档。WP/AOI保留`Result.*`与`Tolerance`重算；AOI额外统计`AOIFailureCode`；VI在没有数值容差时统计Block code、Document Version、fail1、Failures area/code、Result.From和StationNo。
+
+缺陷证据采用三层独立建模：AOI的`Result.AOIFailureCode`取首个数字段前4位，VI只在`MS0335all`工作表中将`BlockCode`去除分隔符后取末4位，图片层独立分析固定点、周期、连续异常和水平轨迹。VI人工代码不会覆盖AOI或图片结论。时序规律按同一工站的真实`production_order`计算；图片任务导航使用独立的`task_order`，缺图或过站事件不明确的产品不计为“周期缺失”。
 
 ## 从GitHub部署到公司电脑
 
@@ -74,6 +76,10 @@ $env:MEA5S_REAL_DATA_ROOT="D:\本地数据\dataset_realistic"
 
 - `extracted_defects.csv`、`spatial_clusters.csv`
 - `discovered_patterns.csv`、`alerts.csv`
+- `normalized_defect_codes.csv`、`defect_code_catalog_snapshot.csv`
+- `code_patterns.csv`、`spatial_trajectories.csv`
+- `code_spatial_associations.csv`、`code_label_conflicts.csv`
+- `station_attribution.csv`
 - `analysis_summary.json`、`analysis_config_snapshot.yaml`
 - `task_manifest.json`、`visualizations/`
 - `defect_cooccurrence.csv`、`defect_transitions.csv`
@@ -105,8 +111,9 @@ GitHub Actions在Windows和Python 3.12环境中执行无生产数据的依赖安
 
 1. 排除 `__pycache__`、`.pyc` 和分析输出等生成文件。
 2. 列出本次准备提交的文件，等待确认。
-3. 如果当前位于 `main`，自动创建 `codex/update-时间戳` 分支。
-4. 提交并推送到 `origin`，随后可在GitHub创建Pull Request。
+3. 检查远端 `main` 是否包含本地尚未同步的提交，避免覆盖他人改动。
+4. 提交并直接非强制推送到 `origin/main`，不创建新分支或Pull Request。
+5. 如果运行前位于其他分支，推送成功后自动将本地切回 `main`。
 
 也可以在PowerShell中运行：
 
