@@ -192,5 +192,6 @@ def test_task_writes_code_and_spatial_evidence_outputs(tmp_path: Path) -> None:
         assert (result.output_dir / filename).is_file()
     assert result.summary["normalized_code_event_count"] == 10
     assert not result.frames["code_patterns"].empty
+    assert result.frames["code_patterns"]["evidence_task_orders"].str.strip().ne("").all()
     conflict = result.frames["code_conflicts"]
     assert conflict.loc[conflict.dmc_raw.eq("DMC-005"), "comparison_status"].iloc[0] == "label_conflict"

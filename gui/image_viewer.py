@@ -431,10 +431,19 @@ class ImageReviewWidget(QWidget):
         self.exit_pattern_review()
         if self.products.empty:
             return False
-        observed = self._parse_orders(record.get("observed_orders"))
-        missing = self._parse_orders(record.get("inferred_missing_orders"))
-        if not observed:
-            observed = self._parse_orders(record.get("first_order"))
+        observed: list[int] = []
+        for key in (
+            "observed_orders", "evidence_task_orders", "task_orders",
+            "support_task_orders", "global_order", "first_order",
+        ):
+            observed = self._parse_orders(record.get(key))
+            if observed:
+                break
+        missing: list[int] = []
+        for key in ("inferred_missing_orders", "missing_task_orders"):
+            missing = self._parse_orders(record.get(key))
+            if missing:
+                break
         if not observed and not missing:
             return False
         self.pattern_record = record.copy()
@@ -485,9 +494,14 @@ class ImageReviewWidget(QWidget):
         period_text = "—" if pd.isna(period) else str(int(float(period)))
         confidence = record.get("confidence")
         confidence_text = "—" if pd.isna(confidence) else f"{float(confidence):.1%}"
+        evidence_id = record.get(
+            "pattern_id", record.get("trajectory_id", record.get("evidence_id", "-"))
+        )
+        spatial_id = record.get("cluster_id", record.get("spatial_id", "-"))
+        code = record.get("canonical_code", "-")
         self.pattern_summary.setText(
-            f"规律 {record.get('pattern_id', '-')}　类型：{pattern_type}　"
-            f"空间簇：{record.get('cluster_id', '-')}　周期：{period_text}　"
+            f"证据 {evidence_id}　类型：{pattern_type}　"
+            f"代码：{code}　空间：{spatial_id}　周期：{period_text}　"
             f"置信度：{confidence_text}　命中：{len(observed)}　缺失：{len(missing)}"
         )
         self.pattern_panel.setVisible(True)

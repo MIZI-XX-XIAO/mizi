@@ -478,6 +478,11 @@ class MainWindow(QMainWindow):
         self.code_conflict_widget = DataFrameTableWidget("code_label_conflicts")
         self.trajectory_widget = DataFrameTableWidget("spatial_trajectories")
         self.attribution_widget = DataFrameTableWidget("station_attribution")
+        for evidence_table in (
+            self.code_space_widget, self.code_conflict_widget,
+            self.trajectory_widget, self.attribution_widget,
+        ):
+            evidence_table.row_activated.connect(self._jump_from_pattern)
         tables = QTabWidget()
         tables.addTab(self.relationship_metrics, "统计与效应量")
         tables.addTab(self.relationship_bins, "区间缺陷率")
@@ -1072,6 +1077,7 @@ class MainWindow(QMainWindow):
                 patterns = discover_code_patterns(
                     frames.get("normalized_codes", pd.DataFrame()), self._result_config,
                     selected_codes, merge_selected=True,
+                    image_links=frames.get("code_image_links", pd.DataFrame()),
                 )
             else:
                 patterns = frames.get("code_patterns", pd.DataFrame()).copy()
@@ -1170,9 +1176,19 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.review)
 
     def _jump_from_pattern(self, record: pd.Series) -> None:
-        if not self.review.show_pattern(record):
-            self.review.jump_to(int(float(record["first_order"])))
-        self.tabs.setCurrentWidget(self.review)
+        if self.review.show_pattern(record):
+            self.tabs.setCurrentWidget(self.review)
+            return
+        for key in ("global_order", "first_order", "first_task_order"):
+            try:
+                value = record.get(key)
+                if value is not None and not pd.isna(value):
+                    self.review.jump_to(int(float(value)))
+                    self.tabs.setCurrentWidget(self.review)
+                    return
+            except (TypeError, ValueError):
+                continue
+        self.statusBar().showMessage("该结果没有可关联的任务图片，无法进入图片复核。", 8000)
 
     def _analyze_process_parameters(self) -> None:
         if self.current_result is None:

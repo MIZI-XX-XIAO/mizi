@@ -90,10 +90,16 @@ def test_selected_codes_can_be_analyzed_separately_or_as_a_family() -> None:
         "defect_name": [""] * 8, "state": ["NOK"] * 8, "code_status": ["defect"] * 8,
     })
     separate = discover_code_patterns(events, _config(), ["5011", "5020"])
-    merged = discover_code_patterns(events, _config(), ["5011", "5020"], merge_selected=True)
+    image_links = events.copy()
+    image_links["global_order"] = range(101, 109)
+    merged = discover_code_patterns(
+        events, _config(), ["5011", "5020"], merge_selected=True,
+        image_links=image_links,
+    )
     assert set(separate.canonical_code) == {"5011", "5020"}
     assert merged.canonical_code.tolist() == ["5011+5020"]
     assert merged.iloc[0].pattern_type == "burst"
+    assert merged.iloc[0].evidence_task_orders == "101;102;103;104;105;106;107;108"
 
 
 def _write_image(path: Path, image: np.ndarray) -> str:

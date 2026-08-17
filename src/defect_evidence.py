@@ -26,7 +26,7 @@ CODE_PATTERN_COLUMNS = [
     "canonical_code", "defect_name", "pattern_type", "occurrence_count",
     "first_production_order", "last_production_order", "observed_production_orders",
     "period", "phase_start_production_order", "precision", "coverage", "confidence",
-    "missing_production_orders",
+    "missing_production_orders", "evidence_task_orders", "missing_task_orders",
 ]
 TRAJECTORY_COLUMNS = [
     "trajectory_id", "analysis_scope", "station_id", "pattern_type", "occurrence_count",
@@ -38,6 +38,7 @@ ASSOCIATION_COLUMNS = [
     "analysis_scope", "station_id", "source_type", "canonical_code", "defect_name",
     "spatial_type", "spatial_id", "support_products", "code_products", "spatial_products",
     "p_spatial_given_code", "p_code_given_spatial", "lift", "association_strength",
+    "support_task_orders",
 ]
 CONFLICT_COLUMNS = [
     "analysis_scope", "global_order", "production_order", "dmc_raw", "aoi_codes", "vi_codes",
@@ -45,7 +46,7 @@ CONFLICT_COLUMNS = [
 ]
 ATTRIBUTION_COLUMNS = [
     "evidence_id", "analysis_scope", "station_id", "evidence_source", "pattern_type",
-    "association_level", "equipment_conclusion", "reason",
+    "association_level", "equipment_conclusion", "reason", "evidence_task_orders",
 ]
 
 
@@ -205,7 +206,8 @@ def normalize_defect_codes(events: pd.DataFrame, catalog: DefectCatalog) -> pd.D
 
 def discover_code_patterns(events: pd.DataFrame, config: dict[str, Any],
                            selected_codes: Iterable[str] | None = None,
-                           merge_selected: bool = False) -> pd.DataFrame:
+                           merge_selected: bool = False,
+                           image_links: pd.DataFrame | None = None) -> pd.DataFrame:
     defects = events[events["code_status"].isin(["defect", "state_code_conflict"])].copy()
     selected = {str(value) for value in (selected_codes or []) if str(value)}
     if selected:
@@ -230,17 +232,19 @@ def discover_code_patterns(events: pd.DataFrame, config: dict[str, Any],
             ]["production_order"], errors="coerce"
         ).dropna().astype(int)))
         fit, run = fit_period(orders, config, eligible_orders), longest_consecutive_run(orders)
+        missing_orders: list[int] = []
         if fit:
             kind = "periodic"
             eligible = set(eligible_orders)
             expected = [order for order in range(
                 int(fit["phase_start"]), max(orders) + 1, int(fit["period"])
             ) if order in eligible]
+            missing_orders = sorted(set(expected) - set(fit["matched_orders"]))
             metrics = {
                 "period": int(fit["period"]), "phase_start_production_order": int(fit["phase_start"]),
                 "precision": round(float(fit["precision"]), 4), "coverage": round(float(fit["coverage"]), 4),
                 "confidence": round(float(fit["confidence"]), 4),
-                "missing_production_orders": ";".join(map(str, sorted(set(expected) - set(fit["matched_orders"])))),
+                "missing_production_orders": ";".join(map(str, missing_orders)),
             }
         elif len(run) >= int(config["burst_minimum_length"]):
             kind, metrics = "burst", {"period": None, "phase_start_production_order": run[0],
@@ -251,13 +255,37 @@ def discover_code_patterns(events: pd.DataFrame, config: dict[str, Any],
                                            "precision": None, "coverage": None, "confidence": None,
                                            "missing_production_orders": ""}
         names = [value for value in group["defect_name"].dropna().astype(str) if value]
+        evidence_task_orders: list[int] = []
+        missing_task_orders: list[int] = []
+        if image_links is not None and not image_links.empty and "global_order" in image_links:
+            station_links = image_links[
+                image_links["analysis_scope"].astype(str).eq(str(keys[0]))
+                & image_links["station_id"].astype(str).eq(str(keys[1]))
+                & image_links["source_type"].astype(str).eq(str(keys[2]))
+            ]
+            observed_codes = set(group["canonical_code"].astype(str))
+            observed_links = station_links[
+                station_links["canonical_code"].astype(str).isin(observed_codes)
+                & pd.to_numeric(station_links["production_order"], errors="coerce").isin(orders)
+            ]
+            evidence_task_orders = sorted(set(
+                pd.to_numeric(observed_links["global_order"], errors="coerce").dropna().astype(int)
+            ))
+            missing_links = station_links[
+                pd.to_numeric(station_links["production_order"], errors="coerce").isin(missing_orders)
+            ]
+            missing_task_orders = sorted(set(
+                pd.to_numeric(missing_links["global_order"], errors="coerce").dropna().astype(int)
+            ))
         rows.append({
             "pattern_id": f"CP{len(rows) + 1:04d}", "evidence_source": "code",
             "analysis_scope": keys[0], "station_id": keys[1], "source_type": keys[2],
             "canonical_code": keys[3], "defect_name": " / ".join(dict.fromkeys(names)),
             "pattern_type": kind, "occurrence_count": len(orders),
             "first_production_order": min(orders), "last_production_order": max(orders),
-            "observed_production_orders": ";".join(map(str, orders)), **metrics,
+            "observed_production_orders": ";".join(map(str, orders)),
+            "evidence_task_orders": ";".join(map(str, evidence_task_orders)),
+            "missing_task_orders": ";".join(map(str, missing_task_orders)), **metrics,
         })
     return pd.DataFrame(rows, columns=CODE_PATTERN_COLUMNS)
 
@@ -415,7 +443,7 @@ def analyze_code_spatial_associations(products: pd.DataFrame, code_events: pd.Da
     defect_codes = code_events[
         code_events["code_status"].isin(["defect", "state_code_conflict"])
     ].copy()
-    codes = _map_code_events_to_products(products, defect_codes)
+    codes = map_code_events_to_products(products, defect_codes)
     if codes.empty:
         return pd.DataFrame(columns=ASSOCIATION_COLUMNS), pd.DataFrame(columns=CONFLICT_COLUMNS)
     production_lookup = products.set_index("global_order").get(
@@ -455,6 +483,7 @@ def analyze_code_spatial_associations(products: pd.DataFrame, code_events: pd.Da
                     "spatial_products": len(spatial_orders), "p_spatial_given_code": round(p_space, 5),
                     "p_code_given_spatial": round(p_code, 5), "lift": round(lift, 5),
                     "association_strength": strength,
+                    "support_task_orders": ";".join(map(str, sorted(code_orders & spatial_orders))),
                 })
     conflicts: list[dict[str, Any]] = []
     for (scope, global_order, dmc), group in codes.groupby(
@@ -477,7 +506,7 @@ def analyze_code_spatial_associations(products: pd.DataFrame, code_events: pd.Da
     )
 
 
-def _map_code_events_to_products(products: pd.DataFrame, codes: pd.DataFrame) -> pd.DataFrame:
+def map_code_events_to_products(products: pd.DataFrame, codes: pd.DataFrame) -> pd.DataFrame:
     """Prefer exact AOI/VI event IDs; DMC fallback is allowed only when both sides are unique."""
     if codes.empty:
         return codes.assign(global_order=pd.Series(dtype="Int64"))
@@ -560,7 +589,10 @@ def build_station_attribution(
                          "pattern_type": item.get("pattern_type"),
                          "association_level": level,
                          "equipment_conclusion": "设备原因待确认",
-                         "reason": reason})
+                         "reason": reason,
+                         "evidence_task_orders": item.get(
+                             "evidence_task_orders", item.get("task_orders", "")
+                         )})
     strong_associations = (
         associations[associations["association_strength"].isin(["strong", "medium"])]
         if not associations.empty and "association_strength" in associations else associations.iloc[0:0]
@@ -570,7 +602,8 @@ def build_station_attribution(
                      "analysis_scope": item["analysis_scope"], "station_id": item.get("station_id", ""),
                      "evidence_source": "code_spatial", "pattern_type": item["spatial_type"],
                      "association_level": "疑似工站相关", "equipment_conclusion": "设备原因待确认",
-                     "reason": "代码与空间证据统计关联；关联不等于因果关系"})
+                     "reason": "代码与空间证据统计关联；关联不等于因果关系",
+                     "evidence_task_orders": item.get("support_task_orders", "")})
     return pd.DataFrame(rows, columns=ATTRIBUTION_COLUMNS)
 
 

@@ -27,7 +27,7 @@ from .contour_extractor import (
 from .defect_evidence import (
     analyze_code_spatial_associations, build_station_attribution,
     discover_code_patterns, discover_spatial_trajectories,
-    load_defect_catalog, normalize_defect_codes,
+    load_defect_catalog, map_code_events_to_products, normalize_defect_codes,
 )
 from .pattern_analyzer import OnlinePatternEngine
 
@@ -432,7 +432,10 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
             normalized_codes = normalized_codes[
                 normalized_codes["analysis_scope"].astype(str).isin(scopes)
             ].reset_index(drop=True)
-        code_patterns = discover_code_patterns(normalized_codes, config)
+        code_image_links = map_code_events_to_products(products, normalized_codes)
+        code_patterns = discover_code_patterns(
+            normalized_codes, config, image_links=code_image_links
+        )
         assigned, trajectories = discover_spatial_trajectories(products, assigned, config)
         code_space, code_conflicts = analyze_code_spatial_associations(
             products, normalized_codes, assigned
@@ -547,6 +550,7 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
             "code_patterns": code_patterns, "trajectories": trajectories,
             "code_space": code_space, "code_conflicts": code_conflicts,
             "station_attribution": station_attribution, "defect_catalog": catalog.frame,
+            "code_image_links": code_image_links,
         })
     except InterruptedError:
         for filename in (

@@ -177,6 +177,34 @@ def test_pattern_evidence_strip_and_fullscreen_review(qtbot, tmp_path: Path) -> 
     qtbot.waitUntil(lambda: not window.review._fullscreen.isVisible(), timeout=5_000)
     assert window.review.pattern_panel.isVisible()
     assert window.review.current_order == 1
+
+    code_pattern = pd.Series({
+        "pattern_id": "CP0001", "pattern_type": "periodic", "canonical_code": "5011",
+        "period": 6, "confidence": 0.82, "first_production_order": 100,
+        "observed_production_orders": "100;106", "evidence_task_orders": "1;3",
+        "missing_task_orders": "2",
+    })
+    window._jump_from_pattern(code_pattern)
+    assert window.review.current_order == 1
+    assert window.review.pattern_list.count() == 3
+
+    joint_evidence = pd.Series({
+        "pattern_type": "cluster", "canonical_code": "5011", "spatial_id": "5S-C001",
+        "support_task_orders": "2;3",
+    })
+    window._jump_from_pattern(joint_evidence)
+    assert window.review.current_order == 2
+    assert window.review.pattern_list.count() == 2
+
+    trajectory = pd.Series({
+        "trajectory_id": "5S-T001", "pattern_type": "linear_drift", "task_orders": "1;2;3",
+    })
+    window._jump_from_pattern(trajectory)
+    assert window.review.current_order == 1
+
+    conflict = pd.Series({"global_order": 3, "comparison_status": "label_conflict"})
+    window._jump_from_pattern(conflict)
+    assert window.review.current_order == 3
     window.close()
     window.deleteLater()
 
