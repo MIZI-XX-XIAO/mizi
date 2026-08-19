@@ -25,11 +25,12 @@ from src.analysis_service import (
 from src.app_runtime import APP_VERSION, configure_logging, new_error_id, user_data_dir
 from src.data_quality import DataQualityReport, validate_products
 from src.defect_relationships import analyze_defect_relationships
-from src.defect_evidence import discover_code_patterns
+from src.result_views import ResultView, build_result_view, pattern_count
 from src.process_relationships import analyze_process_relationships
 from .image_viewer import ImageReviewWidget
 from .analysis_worker import AnalysisWorker
 from .dataframe_table import DataFrameTableWidget
+from .result_dialogs import AlertResultsDialog, PatternResultsDialog
 from .parameter_dialog import ParameterDialog
 from .workbench import ElidedLabel, LayoutProfile, WorkbenchShell, WorkbenchStack
 from .excel_analysis_page import ExcelAnalysisPage
@@ -333,37 +334,22 @@ class MainWindow(QMainWindow):
 
     def _build_result_tab(self) -> None:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setObjectName("resultOverviewScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        scroll.setWidget(content)
+        page_layout.addWidget(scroll)
         title = QLabel("分析结果概览")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        self.kpi_labels: dict[str, QLabel] = {}
-        grid = QGridLayout()
-        items = (
-            ("analyzed_product_count", "产品总数"), ("extracted_defect_count", "提取缺陷"),
-            ("micro_defect_count", "微小缺陷"), ("local_defect_count", "局部缺陷"),
-            ("region_anomaly_count", "区域异常"),
-            ("spatial_cluster_count", "空间簇"), ("discovered_pattern_count", "发现规律"),
-            ("periodic_pattern_count", "周期规律"), ("burst_pattern_count", "连续异常"),
-            ("code_pattern_count", "代码规律"), ("spatial_trajectory_count", "水平轨迹"),
-            ("code_label_conflict_count", "标签冲突"),
-            ("alert_count", "告警数量"), ("elapsed_seconds", "耗时（秒）"),
-        )
-        for index, (key, caption) in enumerate(items):
-            card = QFrame()
-            card.setObjectName("kpiCard")
-            card_layout = QVBoxLayout(card)
-            value = QLabel("-")
-            value.setObjectName("kpiValue")
-            value.setAlignment(Qt.AlignCenter)
-            text = QLabel(caption)
-            text.setAlignment(Qt.AlignCenter)
-            self.kpi_labels[key] = value
-            card_layout.addWidget(value)
-            card_layout.addWidget(text)
-            grid.addWidget(card, index // 4, index % 4)
-        layout.addLayout(grid)
         filters = QGridLayout()
+        filters.setHorizontalSpacing(10)
+        filters.setVerticalSpacing(8)
         self.scope_filter = QComboBox()
         self.scope_filter.addItem("全部范围")
         self.camera_filter = QComboBox()
@@ -382,6 +368,23 @@ class MainWindow(QMainWindow):
             editor.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
             editor.setCalendarPopup(True)
             editor.setVisible(False)
+        self.evidence_mode = QComboBox()
+        for caption, key in (
+            ("全部规律", "all"), ("周期规律", "periodic"), ("连续异常", "burst"),
+            ("代码规律", "code"), ("水平轨迹", "trajectory"),
+            ("缺陷共现", "cooccurrence"), ("序列关系", "transition"),
+            ("其他空间规律", "other"),
+        ):
+            self.evidence_mode.addItem(caption, key)
+        self.code_source_filter = QComboBox()
+        self.code_source_filter.addItem("AOI与VI对照", "all")
+        self.code_source_filter.addItem("仅AOI", "AOI_FAILURE")
+        self.code_source_filter.addItem("仅VI", "VI_BLOCK")
+        self.code_list = QListWidget()
+        self.code_list.setObjectName("resultCodeFilter")
+        self.code_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.code_list.setMaximumHeight(76)
+        self.merge_selected_codes = QCheckBox("合并所选代码为缺陷族")
         self.scope_filter.currentTextChanged.connect(self._apply_global_filters)
         self.camera_filter.currentTextChanged.connect(self._apply_global_filters)
         self.batch_filter.currentTextChanged.connect(self._apply_global_filters)
@@ -390,54 +393,88 @@ class MainWindow(QMainWindow):
         self.order_end.valueChanged.connect(self._apply_global_filters)
         self.time_start.dateTimeChanged.connect(self._apply_global_filters)
         self.time_end.dateTimeChanged.connect(self._apply_global_filters)
-        filters.addWidget(QLabel("全局筛选"), 0, 0)
-        filters.addWidget(self.scope_filter, 0, 1)
-        filters.addWidget(self.camera_filter, 0, 2)
-        filters.addWidget(self.batch_filter, 0, 3)
-        filters.addWidget(self.defect_filter, 0, 4)
-        filters.addWidget(QLabel("产品序号"), 1, 0)
-        filters.addWidget(self.order_start, 1, 1)
-        filters.addWidget(self.order_end, 1, 2)
-        filters.addWidget(self.time_start, 1, 3)
-        filters.addWidget(self.time_end, 1, 4)
-        filters.setColumnStretch(5, 1)
-        layout.addLayout(filters)
-        evidence_filters = QGridLayout()
-        self.evidence_mode = QComboBox()
-        self.evidence_mode.addItem("空间规律", "space")
-        self.evidence_mode.addItem("代码规律", "code")
-        self.evidence_mode.addItem("代码+空间联合", "joint")
-        self.code_source_filter = QComboBox()
-        self.code_source_filter.addItem("AOI与VI对照", "all")
-        self.code_source_filter.addItem("仅AOI", "AOI_FAILURE")
-        self.code_source_filter.addItem("仅VI", "VI_BLOCK")
-        self.code_list = QListWidget()
-        self.code_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.code_list.setMaximumHeight(90)
-        self.merge_selected_codes = QCheckBox("合并所选代码为缺陷族")
         self.evidence_mode.currentIndexChanged.connect(self._apply_global_filters)
         self.code_source_filter.currentIndexChanged.connect(self._apply_global_filters)
         self.code_list.itemSelectionChanged.connect(self._apply_global_filters)
         self.merge_selected_codes.toggled.connect(self._apply_global_filters)
-        evidence_filters.addWidget(QLabel("规律证据"), 0, 0)
-        evidence_filters.addWidget(self.evidence_mode, 0, 1)
-        evidence_filters.addWidget(self.code_source_filter, 0, 2)
-        evidence_filters.addWidget(self.merge_selected_codes, 0, 3)
-        evidence_filters.addWidget(QLabel("缺陷代码（可多选）"), 1, 0)
-        evidence_filters.addWidget(self.code_list, 1, 1, 1, 4)
-        layout.addLayout(evidence_filters)
-        self.pattern_widget = DataFrameTableWidget("patterns")
-        self.pattern_widget.row_activated.connect(self._jump_from_pattern)
-        self.alert_widget = DataFrameTableWidget("alerts", alert_colors=True)
-        self.alert_widget.row_activated.connect(self._jump_from_alert)
-        self.cooccurrence_widget = DataFrameTableWidget("defect_cooccurrence")
-        self.transition_widget = DataFrameTableWidget("defect_transitions")
-        tables = QTabWidget()
-        tables.addTab(self.pattern_widget, "规律")
-        tables.addTab(self.alert_widget, "预警")
-        tables.addTab(self.cooccurrence_widget, "缺陷共现")
-        tables.addTab(self.transition_widget, "序列关系")
-        layout.addWidget(tables, 1)
+        filter_title = QLabel("全局筛选")
+        filter_title.setObjectName("sectionTitle")
+        clear_codes = QPushButton("清除代码选择")
+        clear_codes.setObjectName("quietButton")
+        clear_codes.clicked.connect(self.code_list.clearSelection)
+        filters.addWidget(filter_title, 0, 0)
+        filters.addWidget(clear_codes, 0, 4, Qt.AlignRight)
+        filters.addWidget(QLabel("缺陷代码（可多选）"), 1, 0, Qt.AlignTop)
+        filters.addWidget(self.code_list, 1, 1, 1, 4)
+        filters.addWidget(QLabel("范围 / 相机 / 批次 / 类别"), 2, 0)
+        filters.addWidget(self.scope_filter, 2, 1)
+        filters.addWidget(self.camera_filter, 2, 2)
+        filters.addWidget(self.batch_filter, 2, 3)
+        filters.addWidget(self.defect_filter, 2, 4)
+        filters.addWidget(QLabel("产品序号 / 时间"), 3, 0)
+        filters.addWidget(self.order_start, 3, 1)
+        filters.addWidget(self.order_end, 3, 2)
+        filters.addWidget(self.time_start, 3, 3)
+        filters.addWidget(self.time_end, 3, 4)
+        filters.addWidget(QLabel("规律类型 / 代码来源"), 4, 0)
+        filters.addWidget(self.evidence_mode, 4, 1)
+        filters.addWidget(self.code_source_filter, 4, 2)
+        filters.addWidget(self.merge_selected_codes, 4, 3, 1, 2)
+        for column in range(1, 5):
+            filters.setColumnStretch(column, 1)
+        layout.addLayout(filters)
+
+        self.kpi_labels: dict[str, QLabel] = {}
+        grid = QGridLayout()
+        items = (
+            ("analyzed_product_count", "产品总数", False),
+            ("extracted_defect_count", "提取缺陷", False),
+            ("micro_defect_count", "微小缺陷", False),
+            ("local_defect_count", "局部缺陷", False),
+            ("region_anomaly_count", "区域异常", False),
+            ("spatial_cluster_count", "空间簇", False),
+            ("code_label_conflict_count", "标签冲突", False),
+            ("elapsed_seconds", "耗时（秒）", False),
+            ("discovered_pattern_count", "发现规律  ›", True),
+            ("alert_count", "预警  ›", True),
+        )
+        for index, (key, caption, clickable) in enumerate(items):
+            if clickable:
+                card = QPushButton()
+                card.setObjectName("resultCard")
+                card.setCursor(Qt.PointingHandCursor)
+                accessible_caption = caption.replace("  ›", "")
+                card.setAccessibleName(accessible_caption)
+                card.setToolTip(f"点击查看{accessible_caption}明细")
+            else:
+                card = QFrame()
+                card.setObjectName("kpiCard")
+            card_layout = QVBoxLayout(card)
+            value = QLabel("-")
+            value.setObjectName("resultCardValue" if clickable else "kpiValue")
+            value.setAttribute(Qt.WA_TransparentForMouseEvents)
+            value.setAlignment(Qt.AlignCenter)
+            text = QLabel(caption)
+            text.setAttribute(Qt.WA_TransparentForMouseEvents)
+            text.setAlignment(Qt.AlignCenter)
+            self.kpi_labels[key] = value
+            card_layout.addWidget(value)
+            card_layout.addWidget(text)
+            grid.addWidget(card, index // 4, index % 4)
+            if key == "discovered_pattern_count":
+                self.pattern_result_card = card
+                card.clicked.connect(self._show_pattern_results)
+            elif key == "alert_count":
+                self.alert_result_card = card
+                card.clicked.connect(self._show_alert_results)
+        layout.addLayout(grid)
+        layout.addStretch(1)
+
+        self.pattern_dialog = PatternResultsDialog(self)
+        self.pattern_dialog.pattern_activated.connect(self._jump_from_pattern)
+        self.alert_dialog = AlertResultsDialog(self)
+        self.alert_dialog.alert_activated.connect(self._jump_from_alert)
+        self._current_result_view: ResultView | None = None
         self.tabs.addTab(page, "④ 结果概览")
 
     def _build_relationship_tab(self) -> None:
@@ -881,8 +918,6 @@ class MainWindow(QMainWindow):
         )
         self._cooccurrence_frame = cooccurrence
         self._transition_frame = transitions
-        self.cooccurrence_widget.set_frame(cooccurrence)
-        self.transition_widget.set_frame(transitions)
         self.code_space_widget.set_frame(result.frames.get("code_space", pd.DataFrame()))
         self.code_conflict_widget.set_frame(result.frames.get("code_conflicts", pd.DataFrame()))
         self.trajectory_widget.set_frame(result.frames.get("trajectories", pd.DataFrame()))
@@ -1043,58 +1078,29 @@ class MainWindow(QMainWindow):
             extracted = extracted[extracted[category].astype(str) == selected_defect]
             orders &= set(extracted.global_order.astype(int))
             products = products[products.global_order.astype(int).isin(orders)]
-        patterns = frames["patterns"]
-        if scope and scope != "全部范围" and not patterns.empty and "analysis_scope" in patterns:
-            patterns = patterns[patterns["analysis_scope"].astype(str).eq(scope)]
-        if (
-            selected_defect and selected_defect != "全部缺陷类别"
-            and not patterns.empty and "cluster_id" in patterns
-        ):
-            patterns = patterns[patterns.cluster_id.astype(str) == selected_defect]
-        if not patterns.empty and "first_order" in patterns:
-            patterns = patterns[
-                pd.to_numeric(patterns.first_order, errors="coerce").fillna(-1).astype(int).isin(orders)
-            ]
-        alerts = frames["alerts"]
-        if scope and scope != "全部范围" and not alerts.empty and "analysis_scope" in alerts:
-            alerts = alerts[alerts["analysis_scope"].astype(str).eq(scope)]
-        if (
-            selected_defect and selected_defect != "全部缺陷类别"
-            and not alerts.empty and "cluster_id" in alerts
-        ):
-            alerts = alerts[alerts.cluster_id.astype(str) == selected_defect]
-        if not alerts.empty and "alert_at_order" in alerts:
-            alerts = alerts[
-                pd.to_numeric(alerts.alert_at_order, errors="coerce").fillna(-1).astype(int).isin(orders)
-            ]
         selected_codes = {
             item.text().split()[0] for item in self.code_list.selectedItems()
         } if hasattr(self, "code_list") else set()
         source = self.code_source_filter.currentData() if hasattr(self, "code_source_filter") else "all"
-        evidence_mode = self.evidence_mode.currentData() if hasattr(self, "evidence_mode") else "space"
-        if evidence_mode == "code":
-            if selected_codes and self.merge_selected_codes.isChecked():
-                patterns = discover_code_patterns(
-                    frames.get("normalized_codes", pd.DataFrame()), self._result_config,
-                    selected_codes, merge_selected=True,
-                    image_links=frames.get("code_image_links", pd.DataFrame()),
-                )
-            else:
-                patterns = frames.get("code_patterns", pd.DataFrame()).copy()
-                if selected_codes and not patterns.empty:
-                    patterns = patterns[patterns["canonical_code"].astype(str).isin(selected_codes)]
-            if source != "all" and not patterns.empty:
-                patterns = patterns[patterns["source_type"].astype(str).eq(str(source))]
-            if scope and scope != "全部范围" and not patterns.empty:
-                patterns = patterns[patterns["analysis_scope"].astype(str).eq(scope)]
-        elif evidence_mode == "joint":
-            patterns = frames.get("code_space", pd.DataFrame()).copy()
-            if selected_codes and not patterns.empty:
-                patterns = patterns[patterns["canonical_code"].astype(str).isin(selected_codes)]
-            if source != "all" and not patterns.empty:
-                patterns = patterns[patterns["source_type"].astype(str).eq(str(source))]
-            if scope and scope != "全部范围" and not patterns.empty:
-                patterns = patterns[patterns["analysis_scope"].astype(str).eq(scope)]
+        view = build_result_view(
+            frames, products, extracted, self._result_config,
+            selected_codes=selected_codes,
+            code_source=str(source or "all"),
+            merge_selected_codes=self.merge_selected_codes.isChecked(),
+        )
+        self._current_result_view = view
+        selected_section = str(self.evidence_mode.currentData() or "all")
+        counts = dict(view.counts)
+        counts["discovered_pattern_count"] = pattern_count(view, selected_section)
+        for key, value in counts.items():
+            if key in self.kpi_labels:
+                self.kpi_labels[key].setText(str(value))
+        self.kpi_labels["elapsed_seconds"].setText(
+            str(self.current_result.summary.get("elapsed_seconds", "-"))
+        )
+        self.pattern_dialog.set_sections(view.sections, selected_section)
+        self.alert_dialog.set_frame(view.alerts)
+
         code_space = frames.get("code_space", pd.DataFrame()).copy()
         if selected_codes and not code_space.empty:
             code_space = code_space[code_space["canonical_code"].astype(str).isin(selected_codes)]
@@ -1103,7 +1109,7 @@ class MainWindow(QMainWindow):
         if scope and scope != "全部范围" and not code_space.empty:
             code_space = code_space[code_space["analysis_scope"].astype(str).eq(scope)]
         conflicts = frames.get("code_conflicts", pd.DataFrame()).copy()
-        trajectories = frames.get("trajectories", pd.DataFrame()).copy()
+        trajectories = view.sections["trajectory"].copy()
         attribution = frames.get("station_attribution", pd.DataFrame()).copy()
         if scope and scope != "全部范围":
             for frame_name, frame in (
@@ -1122,24 +1128,30 @@ class MainWindow(QMainWindow):
         self.code_conflict_widget.set_frame(conflicts)
         self.trajectory_widget.set_frame(trajectories)
         self.attribution_widget.set_frame(attribution)
-        self.pattern_widget.set_frame(patterns)
-        self.alert_widget.set_frame(alerts)
-        cooccurrence = getattr(self, "_cooccurrence_frame", pd.DataFrame()).copy()
-        transitions = getattr(self, "_transition_frame", pd.DataFrame()).copy()
-        if scope and scope != "全部范围":
-            if not cooccurrence.empty and "analysis_scope" in cooccurrence:
-                cooccurrence = cooccurrence[cooccurrence["analysis_scope"].astype(str).eq(scope)]
-            if not transitions.empty and "analysis_scope" in transitions:
-                transitions = transitions[transitions["analysis_scope"].astype(str).eq(scope)]
-        self.cooccurrence_widget.set_frame(cooccurrence)
-        self.transition_widget.set_frame(transitions)
-        self.review.set_data(products, extracted, self._result_config)
+        self.review.set_data(view.products, view.extracted, self._result_config)
         if self.station_workbook is not None:
             self.review.set_station_history(
                 self.station_workbook.events,
                 self.station_workbook.parameters,
                 self.station_workbook.package,
             )
+
+    def _show_pattern_results(self) -> None:
+        if self._current_result_view is None:
+            return
+        selected = str(self.evidence_mode.currentData() or "all")
+        self.pattern_dialog.set_sections(self._current_result_view.sections, selected)
+        self.pattern_dialog.show()
+        self.pattern_dialog.raise_()
+        self.pattern_dialog.activateWindow()
+
+    def _show_alert_results(self) -> None:
+        if self._current_result_view is None:
+            return
+        self.alert_dialog.set_frame(self._current_result_view.alerts)
+        self.alert_dialog.show()
+        self.alert_dialog.raise_()
+        self.alert_dialog.activateWindow()
 
     def _cancelled(self, result: AnalysisResult) -> None:
         self.workbench.header.set_run_state("任务已取消", "ready")
@@ -1171,11 +1183,15 @@ class MainWindow(QMainWindow):
             self.run_log.append("已请求安全取消，当前图片处理完成后停止。")
 
     def _jump_from_alert(self, record: pd.Series) -> None:
+        if hasattr(self, "alert_dialog"):
+            self.alert_dialog.hide()
         self.review.exit_pattern_review()
         self.review.jump_to(int(float(record["alert_at_order"])))
         self.tabs.setCurrentWidget(self.review)
 
     def _jump_from_pattern(self, record: pd.Series) -> None:
+        if hasattr(self, "pattern_dialog"):
+            self.pattern_dialog.hide()
         if self.review.show_pattern(record):
             self.tabs.setCurrentWidget(self.review)
             return

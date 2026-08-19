@@ -60,6 +60,11 @@ class DataFrameTableWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(toolbar_widget)
+        self.empty_label = QLabel("暂无符合当前筛选条件的结果")
+        self.empty_label.setObjectName("emptyResultLabel")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setVisible(False)
+        layout.addWidget(self.empty_label)
         layout.addWidget(self.table)
         state = QSettings().value(f"tables/{settings_key}/header")
         if state is not None:
@@ -67,6 +72,7 @@ class DataFrameTableWidget(QWidget):
 
     def set_frame(self, frame: pd.DataFrame) -> None:
         self.model.set_frame(frame)
+        self.empty_label.setVisible(frame.empty)
         if frame.shape[1] <= 12:
             self.table.resizeColumnsToContents()
 

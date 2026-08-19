@@ -83,6 +83,21 @@ QGroupBox::title {
 QFrame#kpiCard { min-height: 74px; background: #192A47; border: 1px solid #294164; border-radius: 7px; }
 QFrame#kpiCard:hover { border-color: #3A648F; background: #1C304F; }
 QLabel#kpiValue { color: #32B8E9; font-size: 20pt; font-weight: 700; }
+QPushButton#resultCard {
+    min-height: 82px; color: #DCE8F6; background: #173250;
+    border: 1px solid #2C668F; border-radius: 7px; padding: 4px 10px;
+}
+QPushButton#resultCard:hover { color: white; background: #1D4265; border-color: #42B5E7; }
+QPushButton#resultCard:pressed { background: #102A45; border-color: #75D2F5; }
+QPushButton#resultCard:focus { border: 2px solid #49B7E8; }
+QLabel#resultCardValue { color: #55C9F2; font-size: 22pt; font-weight: 700; }
+QLabel#sectionTitle { color: #D9E6F5; font-size: 11pt; font-weight: 650; }
+QLabel#emptyResultLabel {
+    min-height: 42px; color: #8095B2; background: #0D1A2D;
+    border: 1px dashed #365171; border-radius: 5px; padding: 10px;
+}
+QLabel#resultDialogHint { color: #AFC0D6; padding: 2px 1px 7px 1px; }
+QListWidget#resultCodeFilter { background: #0C182A; border-color: #365171; }
 QLabel#stageLabel { color: #3AB4EA; font-size: 15pt; font-weight: 650; }
 QLabel#stageStepper {
     color: #7186A5; background: #111E33; border: 1px solid #294164;

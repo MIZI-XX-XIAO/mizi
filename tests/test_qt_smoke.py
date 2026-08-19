@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QLabel  # noqa: E402
 from gui.main_window import MainWindow  # noqa: E402
 from gui.parameter_dialog import ParameterDialog  # noqa: E402
 from gui.workbench import LayoutProfile, WorkbenchStack, resolve_layout_profile  # noqa: E402
+from src.result_views import ResultView  # noqa: E402
 
 
 def test_main_window_starts(qtbot) -> None:
@@ -32,6 +33,44 @@ def test_main_window_starts(qtbot) -> None:
     assert window.workbench.assistant.connection.text() == "未连接"
     assert "#091424" in window.styleSheet()
     assert window.minimumWidth() <= 980
+    window.close()
+    window.deleteLater()
+
+
+def test_result_cards_open_filtered_dialogs_and_alert_colors_are_readable(qtbot) -> None:
+    window = MainWindow(Path(__file__).resolve().parents[1])
+    qtbot.addWidget(window)
+    window.show()
+    sections = {
+        "periodic": pd.DataFrame(columns=["pattern_id"]),
+        "burst": pd.DataFrame(columns=["pattern_id"]),
+        "code": pd.DataFrame([{"canonical_code": "5520", "pattern_type": "periodic"}]),
+        "trajectory": pd.DataFrame(columns=["trajectory_id"]),
+        "cooccurrence": pd.DataFrame(columns=["缺陷A", "缺陷B"]),
+        "transition": pd.DataFrame(columns=["前一缺陷", "后一缺陷"]),
+        "other": pd.DataFrame(columns=["pattern_id"]),
+    }
+    alerts = pd.DataFrame([{"severity": "warning", "alert_at_order": 2}])
+    window._current_result_view = ResultView(
+        pd.DataFrame(), pd.DataFrame(), alerts, sections, {},
+    )
+    window.evidence_mode.setCurrentIndex(window.evidence_mode.findData("code"))
+
+    qtbot.mouseClick(window.pattern_result_card, Qt.LeftButton)
+    assert window.pattern_dialog.isVisible()
+    assert window.pattern_dialog.tabs.currentWidget() is window.pattern_dialog.widgets["code"]
+    assert "(1)" in window.pattern_dialog.tabs.tabText(
+        window.pattern_dialog.tabs.indexOf(window.pattern_dialog.widgets["code"])
+    )
+
+    qtbot.mouseClick(window.alert_result_card, Qt.LeftButton)
+    assert window.alert_dialog.isVisible()
+    model = window.alert_dialog.table.model
+    index = model.index(0, 0)
+    assert model.data(index, Qt.BackgroundRole).name() == "#493b20"
+    assert model.data(index, Qt.ForegroundRole).name() == "#ffe09b"
+    window.pattern_dialog.close()
+    window.alert_dialog.close()
     window.close()
     window.deleteLater()
 

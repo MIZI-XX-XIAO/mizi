@@ -32,7 +32,18 @@ class DataFrameTableModel(QAbstractTableModel):
             return "" if pd.isna(value) else str(value)
         if role == Qt.BackgroundRole and self.alert_colors and "severity" in self.frame.columns:
             severity = str(self.frame.iloc[index.row()]["severity"])
-            return {"critical": QColor("#ffd6d6"), "warning": QColor("#fff0bf"), "notice": QColor("#dceeff")}.get(severity)
+            return {
+                "critical": QColor("#4a1f2b"),
+                "warning": QColor("#493b20"),
+                "notice": QColor("#183a55"),
+            }.get(severity)
+        if role == Qt.ForegroundRole and self.alert_colors and "severity" in self.frame.columns:
+            severity = str(self.frame.iloc[index.row()]["severity"])
+            return {
+                "critical": QColor("#ffb3c0"),
+                "warning": QColor("#ffe09b"),
+                "notice": QColor("#b9e2ff"),
+            }.get(severity, QColor("#d9e3f0"))
         if role == Qt.TextAlignmentRole:
             return int(Qt.AlignLeft | Qt.AlignVCenter)
         return None
