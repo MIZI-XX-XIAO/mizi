@@ -13,7 +13,7 @@ import psutil
 import yaml
 from PySide6.QtCore import QDateTime, QSettings, QThread, QTimer, Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStatusBar,
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
@@ -380,11 +380,19 @@ class MainWindow(QMainWindow):
         self.code_source_filter.addItem("AOI与VI对照", "all")
         self.code_source_filter.addItem("仅AOI", "AOI_FAILURE")
         self.code_source_filter.addItem("仅VI", "VI_BLOCK")
-        self.code_list = QListWidget()
-        self.code_list.setObjectName("resultCodeFilter")
-        self.code_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.code_list.setMaximumHeight(76)
-        self.merge_selected_codes = QCheckBox("合并所选代码为缺陷族")
+        self.defect_code_filter = QComboBox()
+        self.defect_code_filter.setObjectName("resultCodeFilter")
+        self.defect_code_filter.setEditable(True)
+        self.defect_code_filter.setInsertPolicy(QComboBox.NoInsert)
+        self.defect_code_filter.addItem("全部缺陷代码", "")
+        self.defect_code_filter.lineEdit().setPlaceholderText("选择或输入缺陷代码，例如 5520")
+        self.defect_code_filter.lineEdit().setClearButtonEnabled(True)
+        self.defect_code_filter.completer().setCaseSensitivity(Qt.CaseInsensitive)
+        self.defect_code_filter.completer().setFilterMode(Qt.MatchContains)
+        self.code_filter_timer = QTimer(self)
+        self.code_filter_timer.setSingleShot(True)
+        self.code_filter_timer.setInterval(250)
+        self.code_filter_timer.timeout.connect(self._apply_global_filters)
         self.scope_filter.currentTextChanged.connect(self._apply_global_filters)
         self.camera_filter.currentTextChanged.connect(self._apply_global_filters)
         self.batch_filter.currentTextChanged.connect(self._apply_global_filters)
@@ -395,17 +403,19 @@ class MainWindow(QMainWindow):
         self.time_end.dateTimeChanged.connect(self._apply_global_filters)
         self.evidence_mode.currentIndexChanged.connect(self._apply_global_filters)
         self.code_source_filter.currentIndexChanged.connect(self._apply_global_filters)
-        self.code_list.itemSelectionChanged.connect(self._apply_global_filters)
-        self.merge_selected_codes.toggled.connect(self._apply_global_filters)
+        self.defect_code_filter.currentTextChanged.connect(
+            lambda _text: self.code_filter_timer.start()
+        )
+        self.defect_code_filter.lineEdit().returnPressed.connect(self._apply_code_filter_now)
         filter_title = QLabel("全局筛选")
         filter_title.setObjectName("sectionTitle")
         clear_codes = QPushButton("清除代码选择")
         clear_codes.setObjectName("quietButton")
-        clear_codes.clicked.connect(self.code_list.clearSelection)
+        clear_codes.clicked.connect(self._clear_code_filter)
         filters.addWidget(filter_title, 0, 0)
         filters.addWidget(clear_codes, 0, 4, Qt.AlignRight)
-        filters.addWidget(QLabel("缺陷代码（可多选）"), 1, 0, Qt.AlignTop)
-        filters.addWidget(self.code_list, 1, 1, 1, 4)
+        filters.addWidget(QLabel("缺陷代码"), 1, 0)
+        filters.addWidget(self.defect_code_filter, 1, 1, 1, 4)
         filters.addWidget(QLabel("范围 / 相机 / 批次 / 类别"), 2, 0)
         filters.addWidget(self.scope_filter, 2, 1)
         filters.addWidget(self.camera_filter, 2, 2)
@@ -419,7 +429,6 @@ class MainWindow(QMainWindow):
         filters.addWidget(QLabel("规律类型 / 代码来源"), 4, 0)
         filters.addWidget(self.evidence_mode, 4, 1)
         filters.addWidget(self.code_source_filter, 4, 2)
-        filters.addWidget(self.merge_selected_codes, 4, 3, 1, 2)
         for column in range(1, 5):
             filters.setColumnStretch(column, 1)
         layout.addLayout(filters)
@@ -922,8 +931,9 @@ class MainWindow(QMainWindow):
         self.code_conflict_widget.set_frame(result.frames.get("code_conflicts", pd.DataFrame()))
         self.trajectory_widget.set_frame(result.frames.get("trajectories", pd.DataFrame()))
         self.attribution_widget.set_frame(result.frames.get("station_attribution", pd.DataFrame()))
-        self.code_list.blockSignals(True)
-        self.code_list.clear()
+        self.defect_code_filter.blockSignals(True)
+        self.defect_code_filter.clear()
+        self.defect_code_filter.addItem("全部缺陷代码", "")
         normalized_codes = result.frames.get("normalized_codes", pd.DataFrame())
         if not normalized_codes.empty:
             defect_codes = normalized_codes[
@@ -933,8 +943,9 @@ class MainWindow(QMainWindow):
                 caption = str(row.canonical_code)
                 if str(row.defect_name).strip():
                     caption += f"  {row.defect_name}"
-                self.code_list.addItem(caption)
-        self.code_list.blockSignals(False)
+                self.defect_code_filter.addItem(caption, str(row.canonical_code))
+        self.defect_code_filter.setCurrentIndex(0)
+        self.defect_code_filter.blockSignals(False)
         cooccurrence.to_csv(
             result.output_dir / "defect_cooccurrence.csv", index=False, encoding="utf-8-sig"
         )
@@ -1036,6 +1047,31 @@ class MainWindow(QMainWindow):
         for widget in widgets:
             widget.blockSignals(False)
 
+    def _selected_defect_codes(self) -> set[str]:
+        if not hasattr(self, "defect_code_filter"):
+            return set()
+        text = self.defect_code_filter.currentText().strip()
+        if not text or text == "全部缺陷代码":
+            return set()
+        index = self.defect_code_filter.currentIndex()
+        if index >= 0 and self.defect_code_filter.itemText(index) == text:
+            code = str(self.defect_code_filter.itemData(index) or "").strip()
+        else:
+            code = text.split()[0].strip()
+        return {code} if code else set()
+
+    def _clear_code_filter(self) -> None:
+        self.code_filter_timer.stop()
+        self.defect_code_filter.blockSignals(True)
+        self.defect_code_filter.setCurrentIndex(0)
+        self.defect_code_filter.setEditText("全部缺陷代码")
+        self.defect_code_filter.blockSignals(False)
+        self._apply_global_filters()
+
+    def _apply_code_filter_now(self) -> None:
+        self.code_filter_timer.stop()
+        self._apply_global_filters()
+
     def _apply_global_filters(self, *_args) -> None:
         if self.current_result is None:
             return
@@ -1078,15 +1114,13 @@ class MainWindow(QMainWindow):
             extracted = extracted[extracted[category].astype(str) == selected_defect]
             orders &= set(extracted.global_order.astype(int))
             products = products[products.global_order.astype(int).isin(orders)]
-        selected_codes = {
-            item.text().split()[0] for item in self.code_list.selectedItems()
-        } if hasattr(self, "code_list") else set()
+        selected_codes = self._selected_defect_codes()
         source = self.code_source_filter.currentData() if hasattr(self, "code_source_filter") else "all"
         view = build_result_view(
             frames, products, extracted, self._result_config,
             selected_codes=selected_codes,
             code_source=str(source or "all"),
-            merge_selected_codes=self.merge_selected_codes.isChecked(),
+            merge_selected_codes=False,
         )
         self._current_result_view = view
         selected_section = str(self.evidence_mode.currentData() or "all")

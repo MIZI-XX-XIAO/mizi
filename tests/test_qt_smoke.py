@@ -33,6 +33,11 @@ def test_main_window_starts(qtbot) -> None:
     assert window.workbench.assistant.connection.text() == "未连接"
     assert "#091424" in window.styleSheet()
     assert window.minimumWidth() <= 980
+    assert window.defect_code_filter.isEditable()
+    window.defect_code_filter.setEditText("5520")
+    assert window._selected_defect_codes() == {"5520"}
+    window._clear_code_filter()
+    assert window._selected_defect_codes() == set()
     window.close()
     window.deleteLater()
 

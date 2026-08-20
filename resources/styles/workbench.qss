@@ -97,7 +97,7 @@ QLabel#emptyResultLabel {
     border: 1px dashed #365171; border-radius: 5px; padding: 10px;
 }
 QLabel#resultDialogHint { color: #AFC0D6; padding: 2px 1px 7px 1px; }
-QListWidget#resultCodeFilter { background: #0C182A; border-color: #365171; }
+QComboBox#resultCodeFilter { background: #0C182A; border-color: #365171; }
 QLabel#stageLabel { color: #3AB4EA; font-size: 15pt; font-weight: 650; }
 QLabel#stageStepper {
     color: #7186A5; background: #111E33; border: 1px solid #294164;
