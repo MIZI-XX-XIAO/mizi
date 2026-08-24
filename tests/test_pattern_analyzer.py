@@ -23,6 +23,29 @@ def test_period_fit_prefers_24_over_divisors_and_tolerates_missing() -> None:
     assert result["phase_start"] == 13
 
 
+def test_sparse_production_axis_prefers_direct_period_and_separates_outlier() -> None:
+    orders = [286, 292, 298, 304, 310, 311, 316, 322]
+    result = fit_period(orders, _config(), orders)
+    assert result is not None
+    assert result["period"] == 6
+    assert result["matched_orders"] == [286, 292, 298, 304, 310, 316, 322]
+
+    products = pd.DataFrame({"global_order": orders})
+    detections = pd.DataFrame([
+        {"detected_id": f"X{index:04d}", "global_order": order,
+         "center_x_norm": 0.4, "center_y_norm": 0.4, "cluster_id": "",
+         "detection_type": "local"}
+        for index, order in enumerate(orders, 1)
+    ])
+    _, clusters, patterns, _ = OnlinePatternEngine(_config()).process(products, detections)
+    periodic = patterns[patterns.pattern_type.eq("periodic")].iloc[0]
+    assert int(periodic.period) == 6
+    assert int(periodic.occurrence_count) == 7
+    assert periodic.observed_orders == "286;292;298;304;310;316;322"
+    assert periodic.outlier_orders == "311"
+    assert "311" in clusters.iloc[0].orders.split(";")
+
+
 def test_unavailable_product_position_is_not_counted_as_period_missing() -> None:
     products = pd.DataFrame({"global_order": [order for order in range(1, 26) if order != 19]})
     defect_orders = [1, 7, 13, 25]

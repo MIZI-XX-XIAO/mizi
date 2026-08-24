@@ -26,7 +26,8 @@ CODE_PATTERN_COLUMNS = [
     "canonical_code", "defect_name", "pattern_type", "occurrence_count",
     "first_production_order", "last_production_order", "observed_production_orders",
     "period", "phase_start_production_order", "precision", "coverage", "confidence",
-    "missing_production_orders", "evidence_task_orders", "missing_task_orders",
+    "missing_production_orders", "outlier_production_orders", "evidence_task_orders",
+    "missing_task_orders", "outlier_task_orders",
 ]
 TRAJECTORY_COLUMNS = [
     "trajectory_id", "analysis_scope", "station_id", "pattern_type", "occurrence_count",
@@ -233,30 +234,36 @@ def discover_code_patterns(events: pd.DataFrame, config: dict[str, Any],
         ).dropna().astype(int)))
         fit, run = fit_period(orders, config, eligible_orders), longest_consecutive_run(orders)
         missing_orders: list[int] = []
+        matched_orders = orders
+        outlier_orders: list[int] = []
         if fit:
             kind = "periodic"
+            matched_orders = sorted(set(map(int, fit["matched_orders"])))
+            outlier_orders = sorted(set(orders) - set(matched_orders))
             eligible = set(eligible_orders)
             expected = [order for order in range(
-                int(fit["phase_start"]), max(orders) + 1, int(fit["period"])
+                int(fit["phase_start"]), max(matched_orders) + 1, int(fit["period"])
             ) if order in eligible]
-            missing_orders = sorted(set(expected) - set(fit["matched_orders"]))
+            missing_orders = sorted(set(expected) - set(matched_orders))
             metrics = {
                 "period": int(fit["period"]), "phase_start_production_order": int(fit["phase_start"]),
                 "precision": round(float(fit["precision"]), 4), "coverage": round(float(fit["coverage"]), 4),
                 "confidence": round(float(fit["confidence"]), 4),
                 "missing_production_orders": ";".join(map(str, missing_orders)),
+                "outlier_production_orders": ";".join(map(str, outlier_orders)),
             }
         elif len(run) >= int(config["burst_minimum_length"]):
             kind, metrics = "burst", {"period": None, "phase_start_production_order": run[0],
                                        "precision": 1.0, "coverage": 1.0, "confidence": 1.0,
-                                       "missing_production_orders": ""}
+                                       "missing_production_orders": "", "outlier_production_orders": ""}
         else:
             kind, metrics = "recurrent", {"period": None, "phase_start_production_order": None,
                                            "precision": None, "coverage": None, "confidence": None,
-                                           "missing_production_orders": ""}
+                                           "missing_production_orders": "", "outlier_production_orders": ""}
         names = [value for value in group["defect_name"].dropna().astype(str) if value]
         evidence_task_orders: list[int] = []
         missing_task_orders: list[int] = []
+        outlier_task_orders: list[int] = []
         if image_links is not None and not image_links.empty and "global_order" in image_links:
             station_links = image_links[
                 image_links["analysis_scope"].astype(str).eq(str(keys[0]))
@@ -266,7 +273,7 @@ def discover_code_patterns(events: pd.DataFrame, config: dict[str, Any],
             observed_codes = set(group["canonical_code"].astype(str))
             observed_links = station_links[
                 station_links["canonical_code"].astype(str).isin(observed_codes)
-                & pd.to_numeric(station_links["production_order"], errors="coerce").isin(orders)
+                & pd.to_numeric(station_links["production_order"], errors="coerce").isin(matched_orders)
             ]
             evidence_task_orders = sorted(set(
                 pd.to_numeric(observed_links["global_order"], errors="coerce").dropna().astype(int)
@@ -277,15 +284,23 @@ def discover_code_patterns(events: pd.DataFrame, config: dict[str, Any],
             missing_task_orders = sorted(set(
                 pd.to_numeric(missing_links["global_order"], errors="coerce").dropna().astype(int)
             ))
+            outlier_links = station_links[
+                station_links["canonical_code"].astype(str).isin(observed_codes)
+                & pd.to_numeric(station_links["production_order"], errors="coerce").isin(outlier_orders)
+            ]
+            outlier_task_orders = sorted(set(
+                pd.to_numeric(outlier_links["global_order"], errors="coerce").dropna().astype(int)
+            ))
         rows.append({
             "pattern_id": f"CP{len(rows) + 1:04d}", "evidence_source": "code",
             "analysis_scope": keys[0], "station_id": keys[1], "source_type": keys[2],
             "canonical_code": keys[3], "defect_name": " / ".join(dict.fromkeys(names)),
-            "pattern_type": kind, "occurrence_count": len(orders),
-            "first_production_order": min(orders), "last_production_order": max(orders),
-            "observed_production_orders": ";".join(map(str, orders)),
+            "pattern_type": kind, "occurrence_count": len(matched_orders),
+            "first_production_order": min(matched_orders), "last_production_order": max(matched_orders),
+            "observed_production_orders": ";".join(map(str, matched_orders)),
             "evidence_task_orders": ";".join(map(str, evidence_task_orders)),
-            "missing_task_orders": ";".join(map(str, missing_task_orders)), **metrics,
+            "missing_task_orders": ";".join(map(str, missing_task_orders)),
+            "outlier_task_orders": ";".join(map(str, outlier_task_orders)), **metrics,
         })
     return pd.DataFrame(rows, columns=CODE_PATTERN_COLUMNS)
 

@@ -42,7 +42,7 @@ def test_main_window_starts(qtbot) -> None:
     window.deleteLater()
 
 
-def test_result_cards_open_filtered_dialogs_and_alert_colors_are_readable(qtbot) -> None:
+def test_all_result_cards_open_embedded_details_and_return_to_overview(qtbot) -> None:
     window = MainWindow(Path(__file__).resolve().parents[1])
     qtbot.addWidget(window)
     window.show()
@@ -56,26 +56,49 @@ def test_result_cards_open_filtered_dialogs_and_alert_colors_are_readable(qtbot)
         "other": pd.DataFrame(columns=["pattern_id"]),
     }
     alerts = pd.DataFrame([{"severity": "warning", "alert_at_order": 2}])
+    details = {
+        key: pd.DataFrame([{"global_order": 1, "detail_type": key}])
+        for key in (
+            "analyzed_product_count", "extracted_defect_count", "micro_defect_count",
+            "local_defect_count", "region_anomaly_count", "spatial_cluster_count",
+            "code_label_conflict_count",
+        )
+    }
     window._current_result_view = ResultView(
-        pd.DataFrame(), pd.DataFrame(), alerts, sections, {},
+        pd.DataFrame(), pd.DataFrame(), alerts, sections, {}, details,
     )
     window.evidence_mode.setCurrentIndex(window.evidence_mode.findData("code"))
 
+    assert set(window.result_cards) == {
+        "analyzed_product_count", "extracted_defect_count", "micro_defect_count",
+        "local_defect_count", "region_anomaly_count", "spatial_cluster_count",
+        "code_label_conflict_count", "discovered_pattern_count", "alert_count",
+    }
+    for key in details:
+        qtbot.mouseClick(window.result_cards[key], Qt.LeftButton)
+        assert window.result_stack.currentWidget() is window.result_details
+        assert window.result_details.current_key == key
+        assert window.result_details.table.model.rowCount() == 1
+        qtbot.mouseClick(window.result_details.back_button, Qt.LeftButton)
+        assert window.result_stack.currentWidget() is window.result_overview
+
     qtbot.mouseClick(window.pattern_result_card, Qt.LeftButton)
-    assert window.pattern_dialog.isVisible()
-    assert window.pattern_dialog.tabs.currentWidget() is window.pattern_dialog.widgets["code"]
-    assert "(1)" in window.pattern_dialog.tabs.tabText(
-        window.pattern_dialog.tabs.indexOf(window.pattern_dialog.widgets["code"])
+    assert window.result_stack.currentWidget() is window.result_details
+    assert window.result_details.tabs.currentWidget() is window.result_details.widgets["code"]
+    assert "(1)" in window.result_details.tabs.tabText(
+        window.result_details.tabs.indexOf(window.result_details.widgets["code"])
     )
+    assert "(0)" in window.result_details.tabs.tabText(
+        window.result_details.tabs.indexOf(window.result_details.widgets["periodic"])
+    )
+    qtbot.mouseClick(window.result_details.back_button, Qt.LeftButton)
 
     qtbot.mouseClick(window.alert_result_card, Qt.LeftButton)
-    assert window.alert_dialog.isVisible()
-    model = window.alert_dialog.table.model
+    assert window.result_stack.currentWidget() is window.result_details
+    model = window.result_details.table.model
     index = model.index(0, 0)
     assert model.data(index, Qt.BackgroundRole).name() == "#493b20"
     assert model.data(index, Qt.ForegroundRole).name() == "#ffe09b"
-    window.pattern_dialog.close()
-    window.alert_dialog.close()
     window.close()
     window.deleteLater()
 

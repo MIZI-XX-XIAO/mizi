@@ -102,6 +102,28 @@ def test_selected_codes_can_be_analyzed_separately_or_as_a_family() -> None:
     assert merged.iloc[0].evidence_task_orders == "101;102;103;104;105;106;107;108"
 
 
+def test_code_period_evidence_excludes_same_code_outlier() -> None:
+    orders = [286, 292, 298, 304, 310, 311, 316, 322]
+    events = pd.DataFrame({
+        "analysis_scope": ["5S"] * len(orders),
+        "station_id": ["35_5s_aoi"] * len(orders),
+        "event_id": [f"E{index}" for index in range(len(orders))],
+        "dmc_raw": [f"D{index}" for index in range(len(orders))],
+        "production_order": orders, "test_date": [pd.NaT] * len(orders),
+        "batch": ["B"] * len(orders), "source_type": ["AOI_FAILURE"] * len(orders),
+        "source_sheet": ["AOI"] * len(orders), "raw_code": ["5011"] * len(orders),
+        "canonical_code": ["5011"] * len(orders), "defect_name": [""] * len(orders),
+        "state": ["NOK"] * len(orders), "code_status": ["defect"] * len(orders),
+        "global_order": range(1, len(orders) + 1),
+    })
+    pattern = discover_code_patterns(events, _config(), image_links=events).iloc[0]
+    assert int(pattern.period) == 6
+    assert pattern.observed_production_orders == "286;292;298;304;310;316;322"
+    assert pattern.outlier_production_orders == "311"
+    assert pattern.evidence_task_orders == "1;2;3;4;5;7;8"
+    assert pattern.outlier_task_orders == "6"
+
+
 def _write_image(path: Path, image: np.ndarray) -> str:
     assert cv2.imencode(".png", image)[1].tofile(str(path)) is None
     return str(path)

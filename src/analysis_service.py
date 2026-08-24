@@ -391,13 +391,16 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
                 scope_patterns["pattern_id"] = group_prefix + "-" + scope_patterns["pattern_id"].astype(str)
                 scope_patterns["phase_start_production_order"] = scope_patterns["phase_start"]
                 scope_patterns["observed_production_orders"] = scope_patterns["observed_orders"]
+                scope_patterns["outlier_production_orders"] = scope_patterns.get(
+                    "outlier_orders", pd.Series("", index=scope_patterns.index)
+                )
                 scope_patterns["missing_production_orders"] = scope_patterns["inferred_missing_orders"]
                 for column in ("first_order", "last_order", "confirmed_at_order", "next_expected_order"):
                     if column in scope_patterns:
                         scope_patterns[column] = scope_patterns[column].map(order_to_global)
                 if "phase_start" in scope_patterns:
                     scope_patterns["phase_start"] = scope_patterns["phase_start"].map(order_to_global)
-                for column in ("observed_orders", "inferred_missing_orders"):
+                for column in ("observed_orders", "outlier_orders", "inferred_missing_orders"):
                     if column in scope_patterns:
                         scope_patterns[column] = scope_patterns[column].map(
                             lambda value: _map_order_list(value, order_to_global)

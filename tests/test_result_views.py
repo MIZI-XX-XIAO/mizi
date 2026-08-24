@@ -1,4 +1,4 @@
-"""Tests for the shared overview-card and result-dialog filtering model."""
+"""本文件测试结果概览卡片与内嵌明细共用的筛选数据模型。"""
 
 import pandas as pd
 
@@ -42,7 +42,7 @@ def test_selected_code_filters_every_result_category_through_explicit_links() ->
     products = pd.DataFrame({"analysis_scope": ["5S"] * 3, "global_order": [1, 2, 3]})
     extracted = pd.DataFrame({
         "analysis_scope": ["5S"] * 3, "global_order": [1, 2, 3],
-        "cluster_id": ["C1", "C1", "C2"], "detection_type": ["local_defect"] * 3,
+        "cluster_id": ["C1", "C1", "C2"], "detection_type": ["local"] * 3,
     })
     view = build_result_view(
         _frames(), products, extracted, {}, selected_codes={"5520"},
@@ -58,6 +58,7 @@ def test_selected_code_filters_every_result_category_through_explicit_links() ->
     assert set(view.sections["cooccurrence"]["缺陷A"]) | set(view.sections["cooccurrence"]["缺陷B"]) >= {"5520"}
     assert pattern_count(view, "periodic") == 1
     assert pattern_count(view, "all") == sum(len(frame) for frame in view.sections.values())
+    assert len(view.details["local_defect_count"]) == view.counts["local_defect_count"] == 2
 
 
 def test_code_without_spatial_association_does_not_leak_spatial_results() -> None:
@@ -66,7 +67,7 @@ def test_code_without_spatial_association_does_not_leak_spatial_results() -> Non
     products = pd.DataFrame({"analysis_scope": ["5S"] * 3, "global_order": [1, 2, 3]})
     extracted = pd.DataFrame({
         "analysis_scope": ["5S"] * 3, "global_order": [1, 2, 3],
-        "cluster_id": ["C1", "C1", "C2"], "detection_type": ["local_defect"] * 3,
+        "cluster_id": ["C1", "C1", "C2"], "detection_type": ["local"] * 3,
     })
     view = build_result_view(frames, products, extracted, {}, selected_codes={"5520"})
 

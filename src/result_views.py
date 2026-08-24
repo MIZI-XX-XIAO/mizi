@@ -1,8 +1,8 @@
-"""Build the filtered result views used by overview cards and detail dialogs."""
+"""本文件构建结果概览卡片和内嵌明细共用的筛选结果视图。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 import pandas as pd
@@ -23,6 +23,7 @@ class ResultView:
     alerts: pd.DataFrame
     sections: dict[str, pd.DataFrame]
     counts: dict[str, int]
+    details: dict[str, pd.DataFrame] = field(default_factory=dict)
 
 
 def _text_orders(value: Any) -> set[int]:
@@ -224,21 +225,44 @@ def build_result_view(
         "other": spatial_patterns[~pattern_types.isin(["periodic", "burst"])].copy(),
     }
 
-    detection = visible_extracted.get("detection_type", pd.Series(index=visible_extracted.index, dtype=str)).astype(str)
+    detection = visible_extracted.get(
+        "detection_type", pd.Series(index=visible_extracted.index, dtype=str)
+    ).astype(str).replace({"micro_defect": "micro", "local_defect": "local"})
+    micro_defects = visible_extracted[detection.eq("micro")].copy()
+    local_defects = visible_extracted[detection.eq("local")].copy()
+    region_anomalies = visible_extracted[detection.eq("region_anomaly")].copy()
+    clusters = _filter_scope(frames.get("clusters", pd.DataFrame()), scopes)
+    visible_cluster_ids = set(
+        visible_extracted.get("cluster_id", pd.Series(dtype=str))
+        .fillna("").astype(str).loc[lambda values: values.str.strip().ne("")]
+    )
+    if not clusters.empty and "cluster_id" in clusters:
+        clusters = clusters[clusters["cluster_id"].astype(str).isin(visible_cluster_ids)].copy()
     conflicts = _filter_scope(frames.get("code_conflicts", pd.DataFrame()), scopes)
     conflicts = _filter_order_evidence(conflicts, visible_orders, scalar_columns=("global_order",))
+    if not conflicts.empty and "comparison_status" in conflicts:
+        conflicts = conflicts[conflicts["comparison_status"].astype(str).eq("label_conflict")].copy()
+    details = {
+        "analyzed_product_count": visible_products,
+        "extracted_defect_count": visible_extracted,
+        "micro_defect_count": micro_defects,
+        "local_defect_count": local_defects,
+        "region_anomaly_count": region_anomalies,
+        "spatial_cluster_count": clusters,
+        "code_label_conflict_count": conflicts,
+    }
     counts = {
         "analyzed_product_count": len(visible_products),
         "extracted_defect_count": len(visible_extracted),
-        "micro_defect_count": int(detection.eq("micro_defect").sum()),
-        "local_defect_count": int(detection.eq("local_defect").sum()),
-        "region_anomaly_count": int(detection.eq("region_anomaly").sum()),
-        "spatial_cluster_count": int(visible_extracted.get("cluster_id", pd.Series(dtype=str)).replace("", pd.NA).dropna().nunique()),
+        "micro_defect_count": len(micro_defects),
+        "local_defect_count": len(local_defects),
+        "region_anomaly_count": len(region_anomalies),
+        "spatial_cluster_count": len(clusters),
         "code_label_conflict_count": len(conflicts),
         "alert_count": len(alerts),
         "discovered_pattern_count": sum(len(sections[name]) for name in PATTERN_SECTION_ORDER),
     }
-    return ResultView(visible_products, visible_extracted, alerts, sections, counts)
+    return ResultView(visible_products, visible_extracted, alerts, sections, counts, details)
 
 
 def pattern_count(view: ResultView, selected_section: str) -> int:

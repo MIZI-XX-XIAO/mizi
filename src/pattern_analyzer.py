@@ -49,16 +49,25 @@ def fit_period(orders: list[int], config: dict[str, Any],
             precision = len(matched) / len(values)
             coverage = min(1.0, len(matched) / expected_slots)
             confidence = 2 * precision * coverage / (precision + coverage) if precision + coverage else 0.0
+            matched_gaps = [right - left for left, right in zip(matched, matched[1:])]
+            direct_tolerance = tolerance * 2
+            direct_interval_rate = (
+                sum(abs(gap - period) <= direct_tolerance for gap in matched_gaps) / len(matched_gaps)
+                if matched_gaps else 0.0
+            )
             candidate = {"period": period, "phase_start": first, "precision": precision,
-                         "coverage": coverage, "confidence": confidence, "matched_orders": matched}
+                         "coverage": coverage, "confidence": confidence, "matched_orders": matched,
+                         "direct_interval_rate": direct_interval_rate}
             if precision < float(config["minimum_period_precision"]) or coverage < float(config["minimum_period_coverage"]):
                 continue
-            # Confidence dominates; coverage penalizes divisor periods with many empty slots.
-            key = (confidence, coverage, precision, -period)
+            # Prefer the observed one-step cadence when sparse eligible products make
+            # a true period and one of its divisors otherwise score identically.
+            key = (confidence, coverage, precision, direct_interval_rate, -period)
             if best is None or key > best["_key"]:
                 candidate["_key"] = key; best = candidate
     if best is not None:
         best.pop("_key", None)
+        best.pop("direct_interval_rate", None)
     return best
 
 
@@ -207,22 +216,26 @@ class OnlinePatternEngine:
             if fit:
                 active = self.active_periods.get(cluster.cluster_id, {})
                 eligible = set(ordered_products)
+                matched = sorted(set(map(int, fit["matched_orders"])))
+                outliers = sorted(set(orders) - set(matched))
                 expected = [
                     order for order in range(
-                        int(fit["phase_start"]), max(orders) + 1, int(fit["period"])
+                        int(fit["phase_start"]), max(matched) + 1, int(fit["period"])
                     ) if order in eligible
                 ]
-                missing = sorted(set(expected) - set(fit["matched_orders"]))
+                missing = sorted(set(expected) - set(matched))
                 pattern_rows.append({
                     "pattern_id": f"P{len(pattern_rows) + 1:03d}", "pattern_type": "periodic",
-                    "cluster_id": cluster.cluster_id, "occurrence_count": len(orders),
+                    "cluster_id": cluster.cluster_id, "occurrence_count": len(matched),
                     "period": int(fit["period"]), "phase_start": int(fit["phase_start"]),
                     "confidence": round(float(fit["confidence"]), 4),
                     "precision": round(float(fit["precision"]), 4), "coverage": round(float(fit["coverage"]), 4),
-                    "first_order": min(orders), "last_order": max(orders),
+                    "first_order": min(matched), "last_order": max(matched),
                     "confirmed_at_order": active.get("confirmed_at_order"),
                     "next_expected_order": active.get("next_expected_order"),
-                    "observed_orders": ";".join(map(str, orders)), "inferred_missing_orders": ";".join(map(str, missing)),
+                    "observed_orders": ";".join(map(str, matched)),
+                    "outlier_orders": ";".join(map(str, outliers)),
+                    "inferred_missing_orders": ";".join(map(str, missing)),
                 })
             elif len(run) >= int(self.config["burst_minimum_length"]):
                 pattern_rows.append({
@@ -231,6 +244,7 @@ class OnlinePatternEngine:
                     "phase_start": run[0], "confidence": 1.0, "precision": 1.0, "coverage": 1.0,
                     "first_order": run[0], "last_order": run[-1], "confirmed_at_order": run[-1],
                     "next_expected_order": None, "observed_orders": ";".join(map(str, run)), "inferred_missing_orders": "",
+                    "outlier_orders": "",
                 })
             elif len(orders) >= int(self.config["minimum_repeat_occurrences"]):
                 pattern_rows.append({
@@ -239,5 +253,6 @@ class OnlinePatternEngine:
                     "phase_start": None, "confidence": None, "precision": None, "coverage": None,
                     "first_order": min(orders), "last_order": max(orders), "confirmed_at_order": None,
                     "next_expected_order": None, "observed_orders": ";".join(map(str, orders)), "inferred_missing_orders": "",
+                    "outlier_orders": "",
                 })
         return assigned, pd.DataFrame(cluster_rows), pd.DataFrame(pattern_rows), pd.DataFrame(self.alerts)

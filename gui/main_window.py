@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStatusBar,
-    QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from src.analysis_service import (
@@ -30,7 +30,7 @@ from src.process_relationships import analyze_process_relationships
 from .image_viewer import ImageReviewWidget
 from .analysis_worker import AnalysisWorker
 from .dataframe_table import DataFrameTableWidget
-from .result_dialogs import AlertResultsDialog, PatternResultsDialog
+from .result_dialogs import ResultDetailsWidget
 from .parameter_dialog import ParameterDialog
 from .workbench import ElidedLabel, LayoutProfile, WorkbenchShell, WorkbenchStack
 from .excel_analysis_page import ExcelAnalysisPage
@@ -336,6 +336,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
+        self.result_stack = QStackedWidget()
         scroll = QScrollArea()
         scroll.setObjectName("resultOverviewScroll")
         scroll.setWidgetResizable(True)
@@ -343,7 +344,6 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         scroll.setWidget(content)
-        page_layout.addWidget(scroll)
         title = QLabel("分析结果概览")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
@@ -436,25 +436,25 @@ class MainWindow(QMainWindow):
         self.kpi_labels: dict[str, QLabel] = {}
         grid = QGridLayout()
         items = (
-            ("analyzed_product_count", "产品总数", False),
-            ("extracted_defect_count", "提取缺陷", False),
-            ("micro_defect_count", "微小缺陷", False),
-            ("local_defect_count", "局部缺陷", False),
-            ("region_anomaly_count", "区域异常", False),
-            ("spatial_cluster_count", "空间簇", False),
-            ("code_label_conflict_count", "标签冲突", False),
+            ("analyzed_product_count", "产品总数", True),
+            ("extracted_defect_count", "提取缺陷", True),
+            ("micro_defect_count", "微小缺陷", True),
+            ("local_defect_count", "局部缺陷", True),
+            ("region_anomaly_count", "区域异常", True),
+            ("spatial_cluster_count", "空间簇", True),
+            ("code_label_conflict_count", "标签冲突", True),
             ("elapsed_seconds", "耗时（秒）", False),
-            ("discovered_pattern_count", "发现规律  ›", True),
-            ("alert_count", "预警  ›", True),
+            ("discovered_pattern_count", "发现规律", True),
+            ("alert_count", "预警", True),
         )
+        self.result_cards: dict[str, QPushButton] = {}
         for index, (key, caption, clickable) in enumerate(items):
             if clickable:
                 card = QPushButton()
                 card.setObjectName("resultCard")
                 card.setCursor(Qt.PointingHandCursor)
-                accessible_caption = caption.replace("  ›", "")
-                card.setAccessibleName(accessible_caption)
-                card.setToolTip(f"点击查看{accessible_caption}明细")
+                card.setAccessibleName(caption)
+                card.setToolTip(f"点击查看{caption}明细")
             else:
                 card = QFrame()
                 card.setObjectName("kpiCard")
@@ -463,26 +463,34 @@ class MainWindow(QMainWindow):
             value.setObjectName("resultCardValue" if clickable else "kpiValue")
             value.setAttribute(Qt.WA_TransparentForMouseEvents)
             value.setAlignment(Qt.AlignCenter)
-            text = QLabel(caption)
+            text = QLabel(f"{caption}  ›" if clickable else caption)
             text.setAttribute(Qt.WA_TransparentForMouseEvents)
             text.setAlignment(Qt.AlignCenter)
             self.kpi_labels[key] = value
             card_layout.addWidget(value)
             card_layout.addWidget(text)
             grid.addWidget(card, index // 4, index % 4)
+            if clickable:
+                self.result_cards[key] = card
+                card.clicked.connect(
+                    lambda _checked=False, detail_key=key: self._show_result_details(detail_key)
+                )
             if key == "discovered_pattern_count":
                 self.pattern_result_card = card
-                card.clicked.connect(self._show_pattern_results)
             elif key == "alert_count":
                 self.alert_result_card = card
-                card.clicked.connect(self._show_alert_results)
         layout.addLayout(grid)
         layout.addStretch(1)
 
-        self.pattern_dialog = PatternResultsDialog(self)
-        self.pattern_dialog.pattern_activated.connect(self._jump_from_pattern)
-        self.alert_dialog = AlertResultsDialog(self)
-        self.alert_dialog.alert_activated.connect(self._jump_from_alert)
+        self.result_details = ResultDetailsWidget()
+        self.result_details.back_requested.connect(
+            lambda: self.result_stack.setCurrentWidget(scroll)
+        )
+        self.result_details.record_activated.connect(self._activate_result_record)
+        self.result_overview = scroll
+        self.result_stack.addWidget(scroll)
+        self.result_stack.addWidget(self.result_details)
+        page_layout.addWidget(self.result_stack)
         self._current_result_view: ResultView | None = None
         self.tabs.addTab(page, "④ 结果概览")
 
@@ -1132,8 +1140,8 @@ class MainWindow(QMainWindow):
         self.kpi_labels["elapsed_seconds"].setText(
             str(self.current_result.summary.get("elapsed_seconds", "-"))
         )
-        self.pattern_dialog.set_sections(view.sections, selected_section)
-        self.alert_dialog.set_frame(view.alerts)
+        if self.result_stack.currentWidget() is self.result_details:
+            self._show_result_details(self.result_details.current_key)
 
         code_space = frames.get("code_space", pd.DataFrame()).copy()
         if selected_codes and not code_space.empty:
@@ -1170,22 +1178,81 @@ class MainWindow(QMainWindow):
                 self.station_workbook.package,
             )
 
-    def _show_pattern_results(self) -> None:
-        if self._current_result_view is None:
+    def _show_result_details(self, key: str) -> None:
+        if self._current_result_view is None or not key:
             return
-        selected = str(self.evidence_mode.currentData() or "all")
-        self.pattern_dialog.set_sections(self._current_result_view.sections, selected)
-        self.pattern_dialog.show()
-        self.pattern_dialog.raise_()
-        self.pattern_dialog.activateWindow()
+        titles = {
+            "analyzed_product_count": "产品明细",
+            "extracted_defect_count": "提取缺陷明细",
+            "micro_defect_count": "微小缺陷明细",
+            "local_defect_count": "局部缺陷明细",
+            "region_anomaly_count": "区域异常明细",
+            "spatial_cluster_count": "空间簇明细",
+            "code_label_conflict_count": "标签冲突明细",
+            "alert_count": "预警明细",
+        }
+        if key == "discovered_pattern_count":
+            selected = str(self.evidence_mode.currentData() or "all")
+            sections = self._current_result_view.sections
+            if selected != "all":
+                sections = {
+                    name: frame if name == selected else frame.iloc[0:0].copy()
+                    for name, frame in sections.items()
+                }
+            self.result_details.show_patterns(sections, selected)
+        elif key == "alert_count":
+            self.result_details.show_table(
+                key, titles[key], self._current_result_view.alerts, alert_colors=True,
+            )
+        else:
+            frame = self._current_result_view.details.get(key, pd.DataFrame())
+            self.result_details.show_table(key, titles.get(key, "结果明细"), frame)
+        self.result_stack.setCurrentWidget(self.result_details)
+
+    def _show_pattern_results(self) -> None:
+        """Compatibility entry point for opening embedded pattern details."""
+        self._show_result_details("discovered_pattern_count")
 
     def _show_alert_results(self) -> None:
-        if self._current_result_view is None:
+        """Compatibility entry point for opening embedded alert details."""
+        self._show_result_details("alert_count")
+
+    def _activate_result_record(self, key: str, record: pd.Series) -> None:
+        if key == "alert_count":
+            self._jump_from_alert(record)
             return
-        self.alert_dialog.set_frame(self._current_result_view.alerts)
-        self.alert_dialog.show()
-        self.alert_dialog.raise_()
-        self.alert_dialog.activateWindow()
+        if key in {
+            "analyzed_product_count", "extracted_defect_count", "micro_defect_count",
+            "local_defect_count", "region_anomaly_count", "code_label_conflict_count",
+        }:
+            try:
+                order = int(float(record.get("global_order")))
+            except (TypeError, ValueError):
+                self.statusBar().showMessage("该结果没有可关联的任务图片。", 8000)
+                return
+            self.review.exit_pattern_review()
+            self.review.jump_to(order)
+            self.tabs.setCurrentWidget(self.review)
+            return
+        if key == "spatial_cluster_count" and self._current_result_view is not None:
+            cluster_id = str(record.get("cluster_id", ""))
+            detections = self._current_result_view.extracted
+            matches = detections[
+                detections.get("cluster_id", pd.Series(index=detections.index, dtype=str))
+                .fillna("").astype(str).eq(cluster_id)
+            ]
+            orders = sorted(set(
+                pd.to_numeric(matches.get("global_order"), errors="coerce").dropna().astype(int)
+            ))
+            if orders:
+                linked = record.copy()
+                linked["pattern_type"] = "cluster"
+                linked["observed_orders"] = ";".join(map(str, orders))
+                self._jump_from_pattern(linked)
+            else:
+                self.statusBar().showMessage("该空间簇没有当前筛选范围内的任务图片。", 8000)
+            return
+        self._jump_from_pattern(record)
 
     def _cancelled(self, result: AnalysisResult) -> None:
         self.workbench.header.set_run_state("任务已取消", "ready")
@@ -1217,15 +1284,11 @@ class MainWindow(QMainWindow):
             self.run_log.append("已请求安全取消，当前图片处理完成后停止。")
 
     def _jump_from_alert(self, record: pd.Series) -> None:
-        if hasattr(self, "alert_dialog"):
-            self.alert_dialog.hide()
         self.review.exit_pattern_review()
         self.review.jump_to(int(float(record["alert_at_order"])))
         self.tabs.setCurrentWidget(self.review)
 
     def _jump_from_pattern(self, record: pd.Series) -> None:
-        if hasattr(self, "pattern_dialog"):
-            self.pattern_dialog.hide()
         if self.review.show_pattern(record):
             self.tabs.setCurrentWidget(self.review)
             return
