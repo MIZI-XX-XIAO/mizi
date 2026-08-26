@@ -17,6 +17,7 @@ a = Analysis(
         (str(ROOT / "config"), "config"),
         (str(ROOT / "resources"), "resources"),
         (str(ROOT.parent / "MES"), "MES"),
+        (str(ROOT.parent / "image_downloader"), "image_downloader"),
     ],
     hiddenimports=PANDAS_FORMAT_MODULES + OPENPYXL_MODULES + SELENIUM_MODULES,
     hookspath=[],

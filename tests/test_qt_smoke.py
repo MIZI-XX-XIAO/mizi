@@ -77,6 +77,29 @@ def test_mes_download_dialog_opens_from_workbook_row(qtbot) -> None:
     window.deleteLater()
 
 
+def test_image_download_dialog_reads_mes_products_and_uses_safe_defaults(qtbot, tmp_path: Path) -> None:
+    product = "P" + "1" * 24
+    workbook = Workbook(); sheet = workbook.active; sheet.title = "MS0310all"
+    sheet.append(["Ident No.", "Test Date", "Line", "ST", "SI", "FU", "WP", "Result.Force"])
+    sheet.append([product, "2026-08-26 08:00:00", 3003, 10, 1, 1, 6, 1])
+    path = tmp_path / "mes_for_images.xlsx"; workbook.save(path); workbook.close()
+
+    window = MainWindow(Path(__file__).resolve().parents[1])
+    qtbot.addWidget(window); window.show(); window.source_excel_edit.setText(str(path))
+    qtbot.mouseClick(window.findChild(QPushButton, "imageDownloadButton"), Qt.LeftButton)
+    dialog = window._image_dialog
+    assert dialog is not None
+    qtbot.addWidget(dialog)
+    assert dialog.product_summary.valid_ids == (product,)
+    assert dialog.batch_size.value() == 80
+    assert dialog.batch_size.maximum() == 100
+    assert dialog.skip_rework.isChecked()
+    assert dialog._selected_codes() == ()
+    assert dialog._quality() == ""
+    assert dialog.password_edit.echoMode() == QLineEdit.Password
+    dialog.close(); window.close(); window.deleteLater()
+
+
 def test_all_result_cards_open_embedded_details_and_return_to_overview(qtbot) -> None:
     window = MainWindow(Path(__file__).resolve().parents[1])
     qtbot.addWidget(window)

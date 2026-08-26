@@ -150,4 +150,17 @@ python scripts/build_portable.py --clean
 
 该功能需要公司网络、Firefox，以及发布包内的 `MES/firefoxdriver/geckodriver.exe`。同一天的不同时间范围会写入不同目录和文件名，避免覆盖已有下载。
 
+## 公司图片网站下载
+
+在“新建任务”中点击“从公司网站自动下载图片…”，或者在MES下载完成后点击“继续下载图片”。程序会从MES工作簿提取25位 `Ident No.`，使用Edge打开公司图片网站，并通过Excel导入模式分批下载图片。
+
+- 默认每批80个产品号，最大不能超过100个。
+- 图片代码和原图/压缩图由每次任务明确选择；“去除7层返工站”默认开启。
+- 单张缺失或异常导致整批失败时，程序会自动重试并按产品号、图片代码递归拆分，保留其他正常图片。
+- 下载完成后校验ZIP和TIFF，将D/E/F/G系列分别放入5S/5X/7S/7X目录，并自动回填新建任务。
+- 异常项写入 `image_download_issues.csv` 和 `image_download_summary.xlsx`；可通过“仅重试异常项…”继续失败内容。
+- LDAP密码仅在本次后台任务内存中使用，不保存到配置、日志或任务清单。
+
+图片网站依赖公司网络、企业证书及登录权限。便携版应携带与公司Edge主版本一致的 `image_downloader/msedgedriver.exe`；未携带时程序会尝试通过Selenium Manager解析驱动。
+
 发布验收可使用 `--validate-images products.csv --image-root 图片路径根目录 --report 报告.json`，让便携版实际解码首组A/E图片并输出四个复核场景的检查结果。

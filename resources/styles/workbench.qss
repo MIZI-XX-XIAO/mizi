@@ -252,3 +252,38 @@ QTextEdit#mesDownloadLog {
     border-radius: 6px; padding: 7px; font-family: "Cascadia Mono", "Consolas";
     font-size: 9pt;
 }
+
+/* 图片网站下载窗口 */
+QDialog#imageDownloadDialog { background: transparent; }
+QFrame#imageDialogSurface {
+    background: #0B1728; border: 1px solid #365171; border-radius: 11px;
+}
+QFrame#imageDialogHeader {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #123451, stop:1 #0D2037);
+    border: none; border-bottom: 1px solid #294164; border-radius: 10px;
+}
+QWidget#imageDialogContent { background: #0B1728; }
+QLabel#imageDialogBadge {
+    min-width: 52px; min-height: 48px; max-width: 52px; max-height: 48px;
+    color: #071C20; background: #42C4E9; border-radius: 8px;
+    font-size: 10pt; font-weight: 800; qproperty-alignment: AlignCenter;
+}
+QLabel#imageDialogTitle { color: #F4F8FC; font-size: 17pt; font-weight: 700; }
+QLabel#imageDialogSubtitle { color: #8DA3C0; font-size: 9.5pt; }
+QDialog#imageDownloadDialog QGroupBox {
+    background: #111E33; border-color: #294164; border-radius: 8px;
+}
+QDialog#imageDownloadDialog QGroupBox::title { background: #111E33; color: #DCE7F5; }
+QDialog#imageDownloadDialog QGroupBox QLabel { color: #91A4C1; font-size: 9pt; }
+QLabel#imageCodeGroupTitle { color: #43BCEB; font-weight: 700; padding: 3px 0; }
+QLabel#imageProductStats { color: #91A4C1; padding: 5px 0; }
+QFrame#imageRunCard { background: #0D1A2D; border: 1px solid #294164; border-radius: 7px; }
+QLabel#imageStatusText { color: #43BCEB; font-weight: 650; }
+QPushButton#imageLogToggle {
+    color: #8095B2; background: transparent; border: none; text-align: left; padding-left: 0;
+}
+QPushButton#imageLogToggle:hover { color: #D9E6F5; background: transparent; }
+QTextEdit#imageDownloadLog {
+    color: #AFC0D6; background: #07111F; border: 1px solid #203552;
+    border-radius: 6px; padding: 7px; font-family: "Cascadia Mono", "Consolas"; font-size: 9pt;
+}

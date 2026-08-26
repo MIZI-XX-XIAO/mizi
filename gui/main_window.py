@@ -11,7 +11,7 @@ import shutil
 import pandas as pd
 import psutil
 import yaml
-from PySide6.QtCore import QDateTime, QSettings, QThread, QTimer, Qt
+from PySide6.QtCore import QDateTime, QSettings, QThread, QTimer, Qt, Slot
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QCompleter, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
@@ -34,7 +34,9 @@ from .result_dialogs import ResultDetailsWidget
 from .parameter_dialog import ParameterDialog
 from .workbench import ElidedLabel, LayoutProfile, WorkbenchShell, WorkbenchStack
 from .excel_analysis_page import ExcelAnalysisPage
+from .image_download_dialog import ImageDownloadDialog
 from .mes_download_panel import MesDownloadDialog
+from src.image_download import ImageDownloadResult
 from src.excel_analysis import ExcelAnalysisResult, excel_relationship_frame, load_excel_workbook
 from src.station_sources import (
     build_image_product_index,
@@ -76,6 +78,7 @@ class MainWindow(QMainWindow):
         self._restore_maximized = False
         self._initial_show = True
         self._mes_dialog: MesDownloadDialog | None = None
+        self._image_dialog: ImageDownloadDialog | None = None
         self.tabs = WorkbenchStack()
         self._build_setup_tab()
         self._build_quality_tab()
@@ -190,6 +193,11 @@ class MainWindow(QMainWindow):
         row.layout().insertWidget(row.layout().count() - 1, mes_button)
         self.source_excel_edit.setPlaceholderText("可选；用于工艺/质量分析并提供Ident No.")
         form.addRow("Excel工作簿（可选）", row)
+        image_download_button = QPushButton("从公司网站自动下载图片…")
+        image_download_button.setObjectName("imageDownloadButton")
+        image_download_button.setToolTip("读取MES工作簿中的产品号，自动分批下载并分类图片")
+        image_download_button.clicked.connect(self._open_image_download)
+        form.addRow("图片自动下载", image_download_button)
         self.scope_image_edits: dict[str, QLineEdit] = {}
         self.scope_image_rows: dict[str, QWidget] = {}
         self.scope_image_labels: dict[str, QLabel] = {}
@@ -279,6 +287,7 @@ class MainWindow(QMainWindow):
         default_output = Path(self.output_edit.text().strip() or str(user_data_dir())) / "MES_downloads"
         dialog = MesDownloadDialog(self.project_root, default_output, self)
         dialog.workbook_ready.connect(self._use_mes_workbook)
+        dialog.continue_to_images.connect(self._continue_images_after_mes)
         dialog.finished.connect(lambda _result: setattr(self, "_mes_dialog", None))
         self._mes_dialog = dialog
         dialog.show()
@@ -287,6 +296,42 @@ class MainWindow(QMainWindow):
         self.source_excel_edit.setText(path)
         self.settings.setValue("paths/source_excel", path)
         self.statusBar().showMessage("MES工作簿已下载并填入新建任务", 8000)
+
+    def _continue_images_after_mes(self, path: str) -> None:
+        if self._mes_dialog is not None:
+            self._mes_dialog.accept()
+        QTimer.singleShot(0, lambda: self._open_image_download(path))
+
+    def _open_image_download(self, workbook_path: str | None = None) -> None:
+        if self._image_dialog is not None and self._image_dialog.isVisible():
+            self._image_dialog.raise_()
+            self._image_dialog.activateWindow()
+            return
+        selected = workbook_path or self.source_excel_edit.text().strip()
+        workbook = Path(selected) if selected else None
+        default_output = Path(self.output_edit.text().strip() or str(user_data_dir())) / "image_downloads"
+        dialog = ImageDownloadDialog(self.project_root, workbook, default_output, self)
+        dialog.result_ready.connect(self._use_downloaded_images)
+        dialog.finished.connect(lambda _result: setattr(self, "_image_dialog", None))
+        self._image_dialog = dialog
+        dialog.show()
+
+    @Slot(object)
+    def _use_downloaded_images(self, result: ImageDownloadResult) -> None:
+        if self._image_dialog is not None:
+            workbook = self._image_dialog.workbook_edit.text().strip()
+            if workbook:
+                self.source_excel_edit.setText(workbook)
+        for scope, path in result.image_roots.items():
+            if scope in self.scope_image_edits:
+                self.scope_image_edits[scope].setText(str(path))
+                self.settings.setValue(f"paths/image_root_{scope.lower()}", str(path))
+        self.statusBar().showMessage(
+            "图片已下载并回填目录，正在检查数据" if result.status == "complete"
+            else "图片部分下载完成，已回填正常图片并生成异常报告",
+            12000,
+        )
+        self._inspect_products()
 
     def _update_task_mode_fields(self) -> None:
         full = self.task_mode_combo.currentData() == "full_process"
@@ -1562,6 +1607,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._save_settings()
+        if self._image_dialog is not None and self._image_dialog.worker is not None:
+            answer = QMessageBox.question(self, "图片下载运行中", "先安全取消图片下载再关闭？")
+            if answer == QMessageBox.Yes:
+                self._image_dialog.worker.cancel()
+            event.ignore()
+            return
         if self._mes_dialog is not None and self._mes_dialog.worker is not None:
             answer = QMessageBox.question(self, "MES下载运行中", "先安全取消MES下载再关闭？")
             if answer == QMessageBox.Yes:

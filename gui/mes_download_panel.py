@@ -67,6 +67,7 @@ class _DialogHeader(QFrame):
 
 class MesDownloadDialog(QDialog):
     workbook_ready = Signal(str)
+    continue_to_images = Signal(str)
 
     def __init__(self, project_root: Path, default_output: Path, parent=None) -> None:
         super().__init__(parent)
@@ -191,11 +192,16 @@ class MesDownloadDialog(QDialog):
         self.start_button.clicked.connect(self._start)
         self.cancel_button = QPushButton("返回")
         self.cancel_button.clicked.connect(self._cancel_or_close)
+        self.image_button = QPushButton("继续下载图片")
+        self.image_button.setVisible(False)
+        self.image_button.setEnabled(False)
+        self.image_button.clicked.connect(self._continue_to_images)
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
         buttons.addWidget(self.log_toggle)
         buttons.addStretch()
         buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.image_button)
         buttons.addWidget(self.start_button)
 
         content_layout.addWidget(range_group)
@@ -214,6 +220,7 @@ class MesDownloadDialog(QDialog):
             self.begin_edit, self.end_edit, self.model_edit, self.domain_edit,
             self.username_edit, self.password_edit, self.output_edit, self.browse_button,
         )
+        self._completed_workbook = ""
 
     def _toggle_log(self, visible: bool) -> None:
         self.log.setVisible(visible)
@@ -249,6 +256,9 @@ class MesDownloadDialog(QDialog):
             self._show_notice(f"请检查输入：{exc}", "error")
             return
         self.notice.setVisible(False)
+        self.image_button.setVisible(False)
+        self.image_button.setEnabled(False)
+        self._completed_workbook = ""
         self.settings.setValue("mes/domain", request.domain)
         self.settings.setValue("mes/username", request.username)
         self.settings.setValue("mes/output_root", str(request.output_root))
@@ -294,7 +304,13 @@ class MesDownloadDialog(QDialog):
         self.status.setText("下载完成")
         self.progress.setValue(100)
         self._show_notice(f"✓ 工作簿已生成并自动填入新建任务\n{path}", "success")
+        self._completed_workbook = path
+        self.image_button.setVisible(True)
         self.workbook_ready.emit(path)
+
+    def _continue_to_images(self) -> None:
+        if self._completed_workbook:
+            self.continue_to_images.emit(self._completed_workbook)
 
     @Slot(str)
     def _on_failed(self, message: str) -> None:
@@ -317,6 +333,7 @@ class MesDownloadDialog(QDialog):
         self.start_button.setText("再次下载")
         self.cancel_button.setEnabled(True)
         self.cancel_button.setText("完成并返回" if self.progress.value() == 100 else "返回")
+        self.image_button.setEnabled(bool(self._completed_workbook))
 
     def _cancel_or_close(self) -> None:
         if self.worker is not None:

@@ -19,7 +19,7 @@ import uuid
 
 APP_NAME = "MEA多工站缺陷规律分析"
 APP_SLUG = "MEA5SDefectAnalysis"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 ALGORITHM_VERSION = "3.0"
 
 
