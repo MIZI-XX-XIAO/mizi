@@ -113,4 +113,7 @@ def test_real_images_complete_gui_workflow(qtbot, tmp_path, monkeypatch) -> None
         type(window.relationship_summary), "warningBanner"
     ).text()
     assert not window.review.process_data.empty
-    assert messages
+    assert not messages
+    assert not window.result_outcome.isHidden()
+    assert "分析任务已完成" in window.result_outcome.text()
+    assert window.result_outcome.objectName() == "successBanner"

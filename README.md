@@ -144,4 +144,10 @@ python scripts/build_portable.py --clean
 
 将整个 `dist/MEA5S缺陷分析/` 目录复制到公司电脑，运行其中的 `MEA5S缺陷分析.exe`，不能只复制单独的 EXE。发布包无需公司电脑安装 Python 或授予管理员权限，`release_manifest.json` 保存发布文件SHA-256。
 
+## MES工作簿下载
+
+在“新建任务”的“Excel工作簿（可选）”右侧点击“从MES下载…”，设置开始/结束时间、可选的10位型号及保存目录。程序会启动Firefox访问OIS Portal，完成全部查询和初步整理后自动把生成的工作簿填回任务。公司账号可以临时输入，密码仅在本次下载期间保存在内存中，不写入设置或源码；留空时可在Firefox中手动登录。
+
+该功能需要公司网络、Firefox，以及发布包内的 `MES/firefoxdriver/geckodriver.exe`。同一天的不同时间范围会写入不同目录和文件名，避免覆盖已有下载。
+
 发布验收可使用 `--validate-images products.csv --image-root 图片路径根目录 --report 报告.json`，让便携版实际解码首组A/E图片并输出四个复核场景的检查结果。

@@ -34,6 +34,7 @@ from .result_dialogs import ResultDetailsWidget
 from .parameter_dialog import ParameterDialog
 from .workbench import ElidedLabel, LayoutProfile, WorkbenchShell, WorkbenchStack
 from .excel_analysis_page import ExcelAnalysisPage
+from .mes_download_panel import MesDownloadDialog
 from src.excel_analysis import ExcelAnalysisResult, excel_relationship_frame, load_excel_workbook
 from src.station_sources import (
     build_image_product_index,
@@ -74,6 +75,7 @@ class MainWindow(QMainWindow):
         self._analysis_started = 0.0
         self._restore_maximized = False
         self._initial_show = True
+        self._mes_dialog: MesDownloadDialog | None = None
         self.tabs = WorkbenchStack()
         self._build_setup_tab()
         self._build_quality_tab()
@@ -181,6 +183,11 @@ class MainWindow(QMainWindow):
         self.source_excel_edit, row = self._path_row(
             self._saved_path("paths/source_excel", ""), True, "Excel工作簿 (*.xlsx *.xlsm)"
         )
+        mes_button = QPushButton("从MES下载…")
+        mes_button.setObjectName("mesDownloadButton")
+        mes_button.setToolTip("输入时间范围，从OIS Portal下载并自动整理Excel")
+        mes_button.clicked.connect(self._open_mes_download)
+        row.layout().insertWidget(row.layout().count() - 1, mes_button)
         self.source_excel_edit.setPlaceholderText("可选；用于工艺/质量分析并提供Ident No.")
         form.addRow("Excel工作簿（可选）", row)
         self.scope_image_edits: dict[str, QLineEdit] = {}
@@ -264,6 +271,23 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(scroll, "① 新建任务")
         self._update_task_mode_fields()
 
+    def _open_mes_download(self) -> None:
+        if self._mes_dialog is not None and self._mes_dialog.isVisible():
+            self._mes_dialog.raise_()
+            self._mes_dialog.activateWindow()
+            return
+        default_output = Path(self.output_edit.text().strip() or str(user_data_dir())) / "MES_downloads"
+        dialog = MesDownloadDialog(self.project_root, default_output, self)
+        dialog.workbook_ready.connect(self._use_mes_workbook)
+        dialog.finished.connect(lambda _result: setattr(self, "_mes_dialog", None))
+        self._mes_dialog = dialog
+        dialog.show()
+
+    def _use_mes_workbook(self, path: str) -> None:
+        self.source_excel_edit.setText(path)
+        self.settings.setValue("paths/source_excel", path)
+        self.statusBar().showMessage("MES工作簿已下载并填入新建任务", 8000)
+
     def _update_task_mode_fields(self) -> None:
         full = self.task_mode_combo.currentData() == "full_process"
         self.scope_combo.setVisible(not full)
@@ -303,6 +327,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         title = QLabel("执行分析")
         title.setObjectName("pageTitle")
+        self.run_outcome = QLabel()
+        self.run_outcome.setWordWrap(True)
+        self.run_outcome.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.run_outcome.setVisible(False)
         self.stage_label = QLabel("等待任务")
         self.stage_label.setObjectName("stageLabel")
         self.stage_steps = QLabel("检查输入  ›  提取缺陷  ›  发现规律  ›  写入结果  ›  生成图表")
@@ -323,6 +351,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel)
         layout.addWidget(title)
+        layout.addWidget(self.run_outcome)
         layout.addWidget(self.stage_label)
         layout.addWidget(self.stage_steps)
         layout.addWidget(self.progress)
@@ -347,6 +376,11 @@ class MainWindow(QMainWindow):
         title = QLabel("分析结果概览")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
+        self.result_outcome = QLabel()
+        self.result_outcome.setWordWrap(True)
+        self.result_outcome.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.result_outcome.setVisible(False)
+        layout.addWidget(self.result_outcome)
         filters = QGridLayout()
         filters.setHorizontalSpacing(10)
         filters.setVerticalSpacing(8)
@@ -872,6 +906,8 @@ class MainWindow(QMainWindow):
             return
         self.live_alerts.clear()
         self.run_log.clear()
+        self.run_outcome.setVisible(False)
+        self.result_outcome.setVisible(False)
         self.progress.setValue(0)
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
@@ -976,7 +1012,11 @@ class MainWindow(QMainWindow):
         self._apply_global_filters()
         self.statusBar().showMessage(f"分析完成：{result.output_dir}")
         self.workbench.header.set_run_state("分析完成", "success")
-        QMessageBox.information(self, "分析完成", f"结果目录：\n{result.output_dir}")
+        self._set_outcome_banner(
+            self.result_outcome,
+            f"✓ 分析任务已完成　结果已保存至：{result.output_dir}",
+            "success",
+        )
         self.tabs.setCurrentIndex(3)
         self._maybe_auto_relationship()
 
@@ -1274,16 +1314,32 @@ class MainWindow(QMainWindow):
 
     def _cancelled(self, result: AnalysisResult) -> None:
         self.workbench.header.set_run_state("任务已取消", "ready")
-        QMessageBox.information(self, "任务已取消", f"部分诊断结果：\n{result.output_dir}")
+        self._set_outcome_banner(
+            self.run_outcome,
+            f"任务已安全取消。部分诊断结果保存在：{result.output_dir}",
+            "warning",
+        )
+        self.tabs.setCurrentIndex(2)
         if self._close_after_cancel:
             self.close()
 
     def _failed(self, message: str) -> None:
         self.logger.error("分析失败：%s", message)
         self.workbench.header.set_run_state("分析失败", "error")
-        QMessageBox.critical(
-            self, "分析失败", f"{message}\n\n诊断日志：{self.log_path}"
+        self._set_outcome_banner(
+            self.run_outcome,
+            f"分析没有完成：{message}\n诊断日志：{self.log_path}",
+            "error",
         )
+        self.tabs.setCurrentIndex(2)
+
+    @staticmethod
+    def _set_outcome_banner(label: QLabel, message: str, kind: str) -> None:
+        label.setObjectName(f"{kind}Banner")
+        label.setText(message)
+        label.setVisible(True)
+        label.style().unpolish(label)
+        label.style().polish(label)
 
     def _thread_finished(self) -> None:
         self.start_button.setEnabled(True)
@@ -1506,6 +1562,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._save_settings()
+        if self._mes_dialog is not None and self._mes_dialog.worker is not None:
+            answer = QMessageBox.question(self, "MES下载运行中", "先安全取消MES下载再关闭？")
+            if answer == QMessageBox.Yes:
+                self._mes_dialog.worker.cancel()
+            event.ignore()
+            return
         if self.excel_page.thread and self.excel_page.thread.isRunning():
             answer = QMessageBox.question(self, "Excel任务运行中", "先安全取消Excel分析再关闭？")
             if answer == QMessageBox.Yes:

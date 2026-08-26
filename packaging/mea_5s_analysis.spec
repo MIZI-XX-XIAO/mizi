@@ -7,6 +7,7 @@ from PyInstaller.utils.hooks import collect_submodules
 ROOT = Path(SPECPATH).parent
 PANDAS_FORMAT_MODULES = collect_submodules("pandas.io.formats")
 OPENPYXL_MODULES = collect_submodules("openpyxl")
+SELENIUM_MODULES = collect_submodules("selenium")
 
 a = Analysis(
     [str(ROOT / "scripts" / "start_gui.py")],
@@ -15,8 +16,9 @@ a = Analysis(
     datas=[
         (str(ROOT / "config"), "config"),
         (str(ROOT / "resources"), "resources"),
+        (str(ROOT.parent / "MES"), "MES"),
     ],
-    hiddenimports=PANDAS_FORMAT_MODULES + OPENPYXL_MODULES,
+    hiddenimports=PANDAS_FORMAT_MODULES + OPENPYXL_MODULES + SELENIUM_MODULES,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

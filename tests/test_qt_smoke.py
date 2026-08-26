@@ -12,7 +12,7 @@ from openpyxl import Workbook
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 from PySide6.QtCore import QSize, Qt  # noqa: E402
-from PySide6.QtWidgets import QLabel  # noqa: E402
+from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton  # noqa: E402
 
 from gui.main_window import MainWindow  # noqa: E402
 from gui.parameter_dialog import ParameterDialog  # noqa: E402
@@ -35,6 +35,7 @@ def test_main_window_starts(qtbot) -> None:
     assert window.minimumWidth() <= 980
     assert window.defect_code_filter.isEditable()
     assert not window.code_list_button.isEnabled()
+    assert window.findChild(QPushButton, "mesDownloadButton") is not None
     normalized_codes = pd.DataFrame([
         {"canonical_code": "5011", "defect_name": "折皱", "code_status": "defect"},
         {"canonical_code": "5050", "defect_name": "白点", "code_status": "defect"},
@@ -56,6 +57,22 @@ def test_main_window_starts(qtbot) -> None:
     assert window._selected_defect_codes() == {"5520"}
     window._clear_code_filter()
     assert window._selected_defect_codes() == set()
+    window.close()
+    window.deleteLater()
+
+
+def test_mes_download_dialog_opens_from_workbook_row(qtbot) -> None:
+    window = MainWindow(Path(__file__).resolve().parents[1])
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.mouseClick(window.findChild(QPushButton, "mesDownloadButton"), Qt.LeftButton)
+    dialog = window._mes_dialog
+    assert dialog is not None
+    qtbot.addWidget(dialog)
+    assert dialog.isVisible()
+    assert dialog.end_edit.dateTime() > dialog.begin_edit.dateTime()
+    assert dialog.password_edit.echoMode() == QLineEdit.Password
+    dialog.close()
     window.close()
     window.deleteLater()
 

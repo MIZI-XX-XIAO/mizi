@@ -13,3 +13,4 @@ PySide6_Addons==6.11.1
 PySide6_Essentials==6.11.1
 shiboken6==6.11.1
 pytest-qt==4.5.0
+selenium==4.35.0
