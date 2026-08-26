@@ -34,6 +34,24 @@ def test_main_window_starts(qtbot) -> None:
     assert "#091424" in window.styleSheet()
     assert window.minimumWidth() <= 980
     assert window.defect_code_filter.isEditable()
+    assert not window.code_list_button.isEnabled()
+    normalized_codes = pd.DataFrame([
+        {"canonical_code": "5011", "defect_name": "折皱", "code_status": "defect"},
+        {"canonical_code": "5050", "defect_name": "白点", "code_status": "defect"},
+        {"canonical_code": "9997", "defect_name": "图片不完整或变形", "code_status": "sealed"},
+    ])
+    window._populate_defect_code_filter(normalized_codes)
+    assert window.code_list_button.isEnabled()
+    assert window.defect_code_filter.count() == 3
+    assert window.defect_code_filter.itemData(1) == "5011"
+    assert window.defect_code_filter.itemData(2) == "5050"
+    window.defect_code_filter.completer().setCompletionPrefix("白点")
+    assert window.defect_code_filter.completer().completionCount() == 1
+    window.defect_code_filter.setCurrentIndex(window.defect_code_filter.findData("5050"))
+    assert window._selected_defect_codes() == {"5050"}
+    qtbot.mouseClick(window.code_list_button, Qt.LeftButton)
+    assert window.defect_code_filter.view().isVisible()
+    window.defect_code_filter.hidePopup()
     window.defect_code_filter.setEditText("5520")
     assert window._selected_defect_codes() == {"5520"}
     window._clear_code_filter()

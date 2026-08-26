@@ -13,7 +13,7 @@ import psutil
 import yaml
 from PySide6.QtCore import QDateTime, QSettings, QThread, QTimer, Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QCompleter, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStatusBar,
     QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
@@ -384,11 +384,18 @@ class MainWindow(QMainWindow):
         self.defect_code_filter.setObjectName("resultCodeFilter")
         self.defect_code_filter.setEditable(True)
         self.defect_code_filter.setInsertPolicy(QComboBox.NoInsert)
+        self.defect_code_filter.setMaxVisibleItems(20)
         self.defect_code_filter.addItem("全部缺陷代码", "")
-        self.defect_code_filter.lineEdit().setPlaceholderText("选择或输入缺陷代码，例如 5520")
+        self.defect_code_filter.lineEdit().setPlaceholderText("输入代码/名称搜索，或点击右侧按钮选择")
         self.defect_code_filter.lineEdit().setClearButtonEnabled(True)
         self.defect_code_filter.completer().setCaseSensitivity(Qt.CaseInsensitive)
         self.defect_code_filter.completer().setFilterMode(Qt.MatchContains)
+        self.defect_code_filter.completer().setCompletionMode(QCompleter.PopupCompletion)
+        self.code_list_button = QPushButton("选择代码 ▼")
+        self.code_list_button.setObjectName("codeListButton")
+        self.code_list_button.setToolTip("展开当前分析结果中的全部缺陷代码")
+        self.code_list_button.setEnabled(False)
+        self.code_list_button.clicked.connect(self.defect_code_filter.showPopup)
         self.code_filter_timer = QTimer(self)
         self.code_filter_timer.setSingleShot(True)
         self.code_filter_timer.setInterval(250)
@@ -415,7 +422,8 @@ class MainWindow(QMainWindow):
         filters.addWidget(filter_title, 0, 0)
         filters.addWidget(clear_codes, 0, 4, Qt.AlignRight)
         filters.addWidget(QLabel("缺陷代码"), 1, 0)
-        filters.addWidget(self.defect_code_filter, 1, 1, 1, 4)
+        filters.addWidget(self.defect_code_filter, 1, 1, 1, 3)
+        filters.addWidget(self.code_list_button, 1, 4)
         filters.addWidget(QLabel("范围 / 相机 / 批次 / 类别"), 2, 0)
         filters.addWidget(self.scope_filter, 2, 1)
         filters.addWidget(self.camera_filter, 2, 2)
@@ -939,21 +947,8 @@ class MainWindow(QMainWindow):
         self.code_conflict_widget.set_frame(result.frames.get("code_conflicts", pd.DataFrame()))
         self.trajectory_widget.set_frame(result.frames.get("trajectories", pd.DataFrame()))
         self.attribution_widget.set_frame(result.frames.get("station_attribution", pd.DataFrame()))
-        self.defect_code_filter.blockSignals(True)
-        self.defect_code_filter.clear()
-        self.defect_code_filter.addItem("全部缺陷代码", "")
         normalized_codes = result.frames.get("normalized_codes", pd.DataFrame())
-        if not normalized_codes.empty:
-            defect_codes = normalized_codes[
-                normalized_codes["code_status"].isin(["defect", "state_code_conflict"])
-            ][["canonical_code", "defect_name"]].drop_duplicates()
-            for row in defect_codes.sort_values("canonical_code").itertuples(index=False):
-                caption = str(row.canonical_code)
-                if str(row.defect_name).strip():
-                    caption += f"  {row.defect_name}"
-                self.defect_code_filter.addItem(caption, str(row.canonical_code))
-        self.defect_code_filter.setCurrentIndex(0)
-        self.defect_code_filter.blockSignals(False)
+        self._populate_defect_code_filter(normalized_codes)
         cooccurrence.to_csv(
             result.output_dir / "defect_cooccurrence.csv", index=False, encoding="utf-8-sig"
         )
@@ -1067,6 +1062,29 @@ class MainWindow(QMainWindow):
         else:
             code = text.split()[0].strip()
         return {code} if code else set()
+
+    def _populate_defect_code_filter(self, normalized_codes: pd.DataFrame) -> None:
+        """Fill the searchable dropdown with unique defect codes and their names."""
+        self.defect_code_filter.blockSignals(True)
+        self.defect_code_filter.clear()
+        self.defect_code_filter.addItem("全部缺陷代码", "")
+        required = {"canonical_code", "defect_name", "code_status"}
+        if not normalized_codes.empty and required.issubset(normalized_codes.columns):
+            defect_codes = normalized_codes[
+                normalized_codes["code_status"].isin(["defect", "state_code_conflict"])
+            ].copy()
+            defect_codes["canonical_code"] = defect_codes["canonical_code"].fillna("").astype(str).str.strip()
+            defect_codes = defect_codes[defect_codes["canonical_code"].ne("")]
+            for code, group in defect_codes.groupby("canonical_code", sort=True):
+                names = [
+                    name for name in group["defect_name"].fillna("").astype(str).str.strip().unique()
+                    if name
+                ]
+                caption = str(code) + (f"  {' / '.join(names)}" if names else "")
+                self.defect_code_filter.addItem(caption, str(code))
+        self.defect_code_filter.setCurrentIndex(0)
+        self.defect_code_filter.blockSignals(False)
+        self.code_list_button.setEnabled(self.defect_code_filter.count() > 1)
 
     def _clear_code_filter(self) -> None:
         self.code_filter_timer.stop()
