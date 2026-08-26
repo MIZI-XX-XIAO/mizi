@@ -11,6 +11,7 @@ from src.defect_evidence import (
     assign_production_order, build_station_attribution, discover_code_patterns,
     discover_spatial_trajectories,
     load_defect_catalog, normalize_defect_codes, parse_aoi_code, parse_vi_block_code,
+    parse_vi_codes,
 )
 
 
@@ -38,6 +39,7 @@ def test_business_code_parsers() -> None:
     assert parse_aoi_code("bad") == ""
     assert parse_vi_block_code("175520_") == "5520"
     assert parse_vi_block_code("17-55-20") == "5520"
+    assert parse_vi_codes("189997_189998_") == ["9997", "9998"]
 
 
 def test_normalization_keeps_aoi_and_vi_as_independent_evidence() -> None:
@@ -53,17 +55,37 @@ def test_normalization_keeps_aoi_and_vi_as_independent_evidence() -> None:
          "source_row": 4, "Result.AOIFailureCode": None},
         {"event_id": "v1", "dmc_raw": "D1", "station_id": "35_5s_vi",
          "test_date": "2026-06-10 10:05", "state": "NOK", "source_sheet": "MS0335all",
-         "source_row": 2, "BlockCode": "175520_"},
+         "source_row": 2, "Failures code": "175030_", "BlockCode": "175520_"},
         {"event_id": "v2", "dmc_raw": "D2", "station_id": "35_5s_vi",
          "test_date": "2026-06-10 10:06", "state": "NOK", "source_sheet": "Other",
          "source_row": 3, "BlockCode": "175520_"},
+        {"event_id": "v3", "dmc_raw": "D3", "station_id": "35_5s_vi",
+         "test_date": "2026-06-10 10:07", "state": "OTHERS", "source_sheet": "MS0335all",
+         "source_row": 4, "Failures code": None, "BlockCode": "175520_"},
+        {"event_id": "v4", "dmc_raw": "D4", "station_id": "57_5x_vi",
+         "test_date": "2026-06-10 10:08", "state": "OTHERS", "source_sheet": "MS0335all",
+         "source_row": 5, "Failures code": "015050", "BlockCode": None},
+        {"event_id": "v5", "dmc_raw": "D5", "station_id": "57_5x_vi",
+         "test_date": "2026-06-10 10:09", "state": "OTHERS", "source_sheet": "MS0335all",
+         "source_row": 6, "Failures code": None, "BlockCode": "189997_189998_"},
     ])
     normalized = normalize_defect_codes(assign_production_order(events), _catalog())
     assert set(normalized.source_type) == {"AOI_FAILURE", "VI_BLOCK"}
     assert normalized.loc[normalized.event_id.eq("a1"), "canonical_code"].iloc[0] == "5011"
     assert normalized.loc[normalized.event_id.eq("a2"), "code_status"].iloc[0] == "normal"
     assert normalized.loc[normalized.event_id.eq("a3"), "code_status"].iloc[0] == "scrapped"
-    assert normalized.loc[normalized.event_id.eq("v1"), "canonical_code"].iloc[0] == "5520"
+    vi = normalized[normalized.event_id.eq("v1")].iloc[0]
+    assert vi.canonical_code == "5030"
+    assert vi.raw_code == "175030_"
+    sealed = normalized[normalized.event_id.eq("v3")].iloc[0]
+    assert sealed.canonical_code == "5520"
+    assert sealed.code_status == "sealed"
+    assert sealed.vi_code_kind == "block"
+    exported_5050 = normalized[normalized.event_id.eq("v4")].iloc[0]
+    assert exported_5050.canonical_code == "5050"
+    assert exported_5050.code_status == "sealed"
+    assert exported_5050.vi_code_kind == "block"
+    assert normalized.loc[normalized.event_id.eq("v5"), "canonical_code"].tolist() == ["9997", "9998"]
     assert "v2" not in set(normalized.event_id)
 
 
@@ -193,11 +215,14 @@ def test_code_space_association_and_label_conflict_are_not_overwritten() -> None
                       "canonical_code": "5011", "defect_name": "折皱", "code_status": "defect"})
         codes.append({"analysis_scope": "5S", "dmc_raw": f"D{index}", "source_type": "VI_BLOCK",
                       "canonical_code": "5011" if index < 4 else "5520", "defect_name": "", "code_status": "defect"})
+    codes.append({"analysis_scope": "5S", "dmc_raw": "D5", "source_type": "VI_BLOCK",
+                  "canonical_code": "9997", "defect_name": "", "code_status": "sealed"})
     detections = pd.DataFrame({"analysis_scope": ["5S"] * 5, "global_order": range(1, 6),
                                "cluster_id": ["C1"] * 5})
     associations, conflicts = analyze_code_spatial_associations(products, pd.DataFrame(codes), detections)
     assert associations.loc[associations.canonical_code.eq("5011"), "association_strength"].iloc[0] == "strong"
     assert conflicts.loc[conflicts.dmc_raw.eq("D4"), "comparison_status"].iloc[0] == "label_conflict"
+    assert conflicts.loc[conflicts.dmc_raw.eq("D5"), "comparison_status"].iloc[0] == "vi_sealed"
 
 
 def test_station_attribution_requires_same_dmc_upstream_evidence() -> None:

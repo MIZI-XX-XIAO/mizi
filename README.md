@@ -27,7 +27,7 @@
 
 Excel质量分析支持`.xlsx`和`.xlsm`，并按工站分为WP、AOI、VI三种分析档。WP/AOI保留`Result.*`与`Tolerance`重算；AOI额外统计`AOIFailureCode`；VI在没有数值容差时统计Block code、Document Version、fail1、Failures area/code、Result.From和StationNo。
 
-缺陷证据采用三层独立建模：AOI的`Result.AOIFailureCode`取首个数字段前4位，VI只在`MS0335all`工作表中将`BlockCode`去除分隔符后取末4位，图片层独立分析固定点、周期、连续异常和水平轨迹。VI人工代码不会覆盖AOI或图片结论。时序规律按同一工站的真实`production_order`计算；图片任务导航使用独立的`task_order`，缺图或过站事件不明确的产品不计为“周期缺失”。
+缺陷证据采用三层独立建模：AOI的`Result.AOIFailureCode`取首个数字段前4位；VI只读取`MS0335all`，`NOK`使用`Failure code`/`Failures code`作为缺陷代码，`OTHERS`使用`BlockCode`作为封存代码（个别导出把5050写入Failures code时仍以OTHERS状态判定为封存）。VI复合代码按分隔后的每个数字段分别取末4位，例如`189997_189998_`解析为`9997;9998`。图片层独立分析固定点、周期、连续异常和水平轨迹。VI人工代码不会覆盖AOI或图片结论。时序规律按同一工站的真实`production_order`计算；图片任务导航使用独立的`task_order`，缺图或过站事件不明确的产品不计为“周期缺失”。
 
 ## 从GitHub部署到公司电脑
 

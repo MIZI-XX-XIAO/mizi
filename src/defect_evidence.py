@@ -19,7 +19,7 @@ CATALOG_COLUMNS = ["layer", "code", "name", "region", "description", "enabled", 
 CODE_COLUMNS = [
     "analysis_scope", "station_id", "event_id", "dmc_raw", "production_order",
     "test_date", "batch", "source_type", "source_sheet", "raw_code",
-    "canonical_code", "defect_name", "state", "code_status",
+    "canonical_code", "defect_name", "state", "code_status", "vi_code_kind",
 ]
 CODE_PATTERN_COLUMNS = [
     "pattern_id", "evidence_source", "analysis_scope", "station_id", "source_type",
@@ -77,9 +77,22 @@ def parse_aoi_code(value: Any) -> str:
 
 
 def parse_vi_block_code(value: Any) -> str:
-    """MS0335all BlockCode uses the last four digits after punctuation removal."""
-    digits = "".join(re.findall(r"\d", text(value)))
-    return digits[-4:] if len(digits) >= 4 else ""
+    """VI Failure(s) code and fallback BlockCode use the last four digits."""
+    codes = parse_vi_codes(value)
+    return codes[-1] if codes else ""
+
+
+def parse_vi_codes(value: Any) -> list[str]:
+    """Extract every VI code token, taking the last four digits of each token."""
+    tokens = re.findall(r"\d+", text(value))
+    if not tokens:
+        return []
+    if len(tokens) > 1 and all(len(token) >= 4 for token in tokens):
+        values = [token[-4:] for token in tokens]
+    else:
+        digits = "".join(tokens)
+        values = [digits[-4:]] if len(digits) >= 4 else []
+    return list(dict.fromkeys(values))
 
 
 @dataclass(frozen=True)
@@ -168,6 +181,10 @@ def normalize_defect_codes(events: pd.DataFrame, catalog: DefectCatalog) -> pd.D
         return pd.DataFrame(columns=CODE_COLUMNS)
     ordered = events if "production_order" in events else assign_production_order(events)
     aoi_fields = [column for column in ordered if norm_key(column) in {"aoifailurecode", "resultaoifailurecode"}]
+    vi_failure_fields = [
+        column for column in ordered
+        if norm_key(column) in {"failurecode", "failurescode"}
+    ]
     block_fields = [column for column in ordered if norm_key(column) == "blockcode"]
     rows: list[dict[str, Any]] = []
     for event in ordered.to_dict("records"):
@@ -194,14 +211,35 @@ def normalize_defect_codes(events: pd.DataFrame, catalog: DefectCatalog) -> pd.D
                          "canonical_code": code, "defect_name": catalog.name_for(scope, code),
                          "code_status": status})
         if station_id.endswith("_vi") and norm_key(common["source_sheet"]) == "ms0335all":
-            raw_values = [text(event.get(field)) for field in block_fields if text(event.get(field))]
+            failure_values = [
+                text(event.get(field)) for field in vi_failure_fields if text(event.get(field))
+            ]
+            block_values = [text(event.get(field)) for field in block_fields if text(event.get(field))]
+            if state == "OTHERS":
+                # OTHERS is a sealed product. A few exports place sealing code 5050
+                # in Failures code; the state remains authoritative.
+                raw_values = block_values or failure_values
+                code_kind = "block"
+                expected_field_present = bool(block_values)
+            else:
+                raw_values = failure_values or block_values
+                code_kind = "failure" if failure_values else "block" if block_values else ""
+                expected_field_present = bool(failure_values) if state == "NOK" else not raw_values
             if not raw_values:
                 raw_values = [""]
             for raw in raw_values:
-                code = parse_vi_block_code(raw)
-                rows.append({**common, "source_type": "VI_BLOCK", "raw_code": raw,
-                             "canonical_code": code, "defect_name": catalog.name_for(scope, code),
-                             "code_status": "defect" if code else ("scrapped" if state == "SCRAPPED" else "unknown")})
+                codes = parse_vi_codes(raw) or [""]
+                for code in codes:
+                    status = (
+                        "sealed" if state == "OTHERS" and code
+                        else "defect" if state == "NOK" and code and expected_field_present
+                        else "normal" if state == "OK" and not code
+                        else "state_code_conflict" if code
+                        else "unknown"
+                    )
+                    rows.append({**common, "source_type": "VI_BLOCK", "raw_code": raw,
+                                 "canonical_code": code, "defect_name": catalog.name_for(scope, code),
+                                 "code_status": status, "vi_code_kind": code_kind})
     return pd.DataFrame(rows, columns=CODE_COLUMNS)
 
 
@@ -455,12 +493,15 @@ def analyze_code_spatial_associations(products: pd.DataFrame, code_events: pd.Da
                                       detections: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if products.empty or code_events.empty:
         return pd.DataFrame(columns=ASSOCIATION_COLUMNS), pd.DataFrame(columns=CONFLICT_COLUMNS)
-    defect_codes = code_events[
-        code_events["code_status"].isin(["defect", "state_code_conflict"])
+    comparison_events = code_events[
+        code_events["code_status"].isin(["defect", "state_code_conflict", "sealed"])
     ].copy()
-    codes = map_code_events_to_products(products, defect_codes)
-    if codes.empty:
+    comparison_codes = map_code_events_to_products(products, comparison_events)
+    if comparison_codes.empty:
         return pd.DataFrame(columns=ASSOCIATION_COLUMNS), pd.DataFrame(columns=CONFLICT_COLUMNS)
+    codes = comparison_codes[
+        comparison_codes["code_status"].isin(["defect", "state_code_conflict"])
+    ].copy()
     production_lookup = products.set_index("global_order").get(
         "production_order", pd.Series(dtype="Int64")
     )
@@ -501,20 +542,30 @@ def analyze_code_spatial_associations(products: pd.DataFrame, code_events: pd.Da
                     "support_task_orders": ";".join(map(str, sorted(code_orders & spatial_orders))),
                 })
     conflicts: list[dict[str, Any]] = []
-    for (scope, global_order, dmc), group in codes.groupby(
+    for (scope, global_order, dmc), group in comparison_codes.groupby(
         ["analysis_scope", "global_order", "dmc_raw"]
     ):
         aoi = sorted(set(group.loc[group["source_type"].eq("AOI_FAILURE"), "canonical_code"].astype(str)))
-        vi = sorted(set(group.loc[group["source_type"].eq("VI_BLOCK"), "canonical_code"].astype(str)))
-        status = (
-            "missing_vi" if aoi and not vi else "missing_aoi" if vi and not aoi
-            else "consistent" if set(aoi) & set(vi) else "label_conflict"
+        vi_group = group[group["source_type"].eq("VI_BLOCK")]
+        vi = sorted(set(vi_group["canonical_code"].astype(str)))
+        sealed = vi_group["code_status"].astype(str).eq("sealed").any()
+        if sealed:
+            status = "vi_sealed"
+        else:
+            status = (
+                "missing_vi" if aoi and not vi else "missing_aoi" if vi and not aoi
+                else "consistent" if set(aoi) & set(vi) else "label_conflict"
+            )
+        review_note = (
+            "VI封存，BlockCode不参与普通缺陷代码一致性判定"
+            if status == "vi_sealed" else
+            "并列证据，未自动修改原始代码" if status == "label_conflict" else ""
         )
         conflicts.append({"analysis_scope": scope, "global_order": int(global_order),
                           "production_order": production_lookup.get(global_order, pd.NA),
                           "dmc_raw": dmc, "aoi_codes": ";".join(aoi),
                           "vi_codes": ";".join(vi), "comparison_status": status,
-                          "review_note": "并列证据，未自动修改原始代码" if status == "label_conflict" else ""})
+                          "review_note": review_note})
     return (
         pd.DataFrame(rows, columns=ASSOCIATION_COLUMNS),
         pd.DataFrame(conflicts, columns=CONFLICT_COLUMNS),

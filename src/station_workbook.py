@@ -328,16 +328,21 @@ def enrich_products_with_station_truth(
             if candidates.empty:
                 continue
             event = candidates.iloc[-1]
-            failure_values = []
+            failure_values: list[str] = []
+            block_values: list[str] = []
             for name, value in event.items():
                 normalized = _norm(name)
-                if any(token in normalized for token in ("failurescode", "failurecode", "blockcode")):
-                    if pd.notna(value) and _text(value):
-                        failure_values.append(_text(value))
+                if pd.isna(value) or not _text(value):
+                    continue
+                if normalized in {"failurecode", "failurescode"}:
+                    failure_values.append(_text(value))
+                elif normalized == "blockcode":
+                    block_values.append(_text(value))
+            vi_codes = failure_values or block_values
             vi_rows.append({
                 "dmc_raw": str(product["dmc_raw"]), "vi_event_id": event["event_id"],
                 "vi_test_date": event["test_date"], "vi_state": event["state"],
-                "vi_state_raw": event["state_raw"], "vi_defect_code": ";".join(failure_values),
+                "vi_state_raw": event["state_raw"], "vi_defect_code": ";".join(vi_codes),
             })
         if vi_rows:
             result = result.merge(pd.DataFrame(vi_rows).drop_duplicates("dmc_raw", keep="last"), on="dmc_raw", how="left")
