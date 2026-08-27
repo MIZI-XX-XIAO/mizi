@@ -14,13 +14,14 @@ import yaml
 from PySide6.QtCore import QDateTime, QSettings, QThread, QTimer, Qt, Slot
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QCompleter, QDateTimeEdit, QFileDialog, QFormLayout, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStatusBar,
     QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from src.analysis_service import (
-    AnalysisRequest, AnalysisResult, ProgressEvent, resolve_image_path,
+    AnalysisRequest, AnalysisResult, AnalysisSelection, ExcelTargetAnalysisRequest,
+    ProgressEvent, code_target_key, resolve_image_path,
 )
 from src.app_runtime import APP_VERSION, configure_logging, new_error_id, user_data_dir
 from src.data_quality import DataQualityReport, validate_products
@@ -47,6 +48,7 @@ from src.station_workbook import (
     StationWorkbookData, enrich_products_with_station_truth, load_station_workbook,
     process_parameter_frame,
 )
+from src.defect_evidence import load_defect_catalog, normalize_defect_codes
 
 
 class MainWindow(QMainWindow):
@@ -72,6 +74,9 @@ class MainWindow(QMainWindow):
         self.analysis_products = pd.DataFrame()
         self._station_issues = pd.DataFrame()
         self.station_workbook: StationWorkbookData | None = None
+        self._inspected_codes = pd.DataFrame()
+        self._inspected_all_codes = pd.DataFrame()
+        self._inspected_parameters = pd.DataFrame()
         self._auto_relationship_pending = False
         self._close_after_cancel = False
         self._analysis_started = 0.0
@@ -226,6 +231,7 @@ class MainWindow(QMainWindow):
         form.addRow("结果保存目录", row)
         self.task_edit = QLineEdit(str(self.settings.value("task/name", "5S分析")))
         form.addRow("任务名称", self.task_edit)
+        target_group = self._build_analysis_target_group()
         advanced_group = QGroupBox("高级设置")
         advanced_group.setObjectName("advancedSettings")
         form = QFormLayout(advanced_group)
@@ -268,6 +274,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(inspect)
         buttons.addWidget(self.start_button)
         layout.addWidget(data_group)
+        layout.addWidget(target_group)
         layout.addWidget(output_group)
         layout.addWidget(advanced_toggle)
         layout.addWidget(advanced_group)
@@ -278,6 +285,87 @@ class MainWindow(QMainWindow):
         scroll.setWidget(page)
         self.tabs.addTab(scroll, "① 新建任务")
         self._update_task_mode_fields()
+
+    def _build_analysis_target_group(self) -> QGroupBox:
+        group = QGroupBox("分析范围与目标")
+        group.setObjectName("analysisTargetGroup")
+        grid = QGridLayout(group)
+        grid.setColumnStretch(1, 1)
+        self.analysis_filter_mode = QComboBox()
+        self.analysis_filter_mode.addItem("全部缺陷综合分析", "all")
+        self.analysis_filter_mode.addItem("指定缺陷代码分析", "selected_codes")
+        self.analysis_filter_mode.addItem("仅分析工艺参数关联", "process_only")
+        grid.addWidget(QLabel("分析方式"), 0, 0)
+        grid.addWidget(self.analysis_filter_mode, 0, 1, 1, 3)
+
+        scope_box = QWidget()
+        scope_layout = QHBoxLayout(scope_box); scope_layout.setContentsMargins(0, 0, 0, 0)
+        self.analysis_scope_checks: dict[str, QCheckBox] = {}
+        for scope in ("5S", "5X", "7S", "7X"):
+            check = QCheckBox(scope); self.analysis_scope_checks[scope] = check
+            scope_layout.addWidget(check)
+        scope_layout.addStretch()
+        grid.addWidget(QLabel("工站范围"), 1, 0); grid.addWidget(scope_box, 1, 1, 1, 3)
+
+        source_box = QWidget()
+        source_layout = QHBoxLayout(source_box); source_layout.setContentsMargins(0, 0, 0, 0)
+        self.code_source_checks = {
+            "AOI_FAILURE": QCheckBox("AOI"), "VI_BLOCK": QCheckBox("VI"),
+        }
+        for check in self.code_source_checks.values():
+            check.setChecked(True); source_layout.addWidget(check)
+        source_layout.addStretch()
+        grid.addWidget(QLabel("代码来源"), 2, 0); grid.addWidget(source_box, 2, 1, 1, 3)
+
+        self.code_search_edit = QLineEdit()
+        self.code_search_edit.setPlaceholderText("输入代码或名称搜索")
+        self.code_selection_list = QListWidget()
+        self.code_selection_list.setMaximumHeight(130)
+        grid.addWidget(QLabel("缺陷代码"), 3, 0)
+        grid.addWidget(self.code_search_edit, 3, 1, 1, 3)
+        grid.addWidget(self.code_selection_list, 4, 1, 1, 3)
+
+        module_box = QWidget()
+        module_layout = QHBoxLayout(module_box); module_layout.setContentsMargins(0, 0, 0, 0)
+        self.analysis_module_checks: dict[str, QCheckBox] = {}
+        for key, caption in (
+            ("code_patterns", "代码时序规律"), ("image_patterns", "图片空间规律"),
+            ("code_image", "代码与图片联合规律"),
+            ("process_relationships", "与工艺参数关联"),
+        ):
+            check = QCheckBox(caption); check.setChecked(True)
+            self.analysis_module_checks[key] = check; module_layout.addWidget(check)
+        module_layout.addStretch()
+        grid.addWidget(QLabel("分析内容"), 5, 0); grid.addWidget(module_box, 5, 1, 1, 3)
+
+        self.parameter_mode_combo = QComboBox()
+        self.parameter_mode_combo.addItem("自动分析全部数值参数", "all")
+        self.parameter_mode_combo.addItem("仅分析勾选参数", "selected")
+        self.parameter_selection_list = QListWidget()
+        self.parameter_selection_list.setMaximumHeight(110)
+        self.parameter_selection_list.setVisible(False)
+        grid.addWidget(QLabel("工艺参数"), 6, 0)
+        grid.addWidget(self.parameter_mode_combo, 6, 1, 1, 3)
+        grid.addWidget(self.parameter_selection_list, 7, 1, 1, 3)
+        self.analysis_selection_preview = QLabel("请先检查数据以载入可选缺陷代码和工艺参数。")
+        self.analysis_selection_preview.setWordWrap(True)
+        grid.addWidget(self.analysis_selection_preview, 8, 0, 1, 4)
+        group.setEnabled(False)
+        self.analysis_target_group = group
+        self.code_search_edit.textChanged.connect(self._filter_target_code_list)
+        self.code_selection_list.itemChanged.connect(self._update_analysis_selection_preview)
+        self.parameter_selection_list.itemChanged.connect(self._update_analysis_selection_preview)
+        self.parameter_mode_combo.currentIndexChanged.connect(
+            lambda: self.parameter_selection_list.setVisible(
+                self.parameter_mode_combo.currentData() == "selected"
+            )
+        )
+        self.parameter_mode_combo.currentIndexChanged.connect(self._update_analysis_selection_preview)
+        self.analysis_filter_mode.currentIndexChanged.connect(self._analysis_mode_changed)
+        for check in (*self.analysis_scope_checks.values(), *self.code_source_checks.values(),
+                      *self.analysis_module_checks.values()):
+            check.toggled.connect(self._update_analysis_selection_preview)
+        return group
 
     def _open_mes_download(self) -> None:
         if self._mes_dialog is not None and self._mes_dialog.isVisible():
@@ -715,10 +803,231 @@ class MainWindow(QMainWindow):
         if directory:
             edit.setText(directory)
 
+    def _analysis_mode_changed(self, *_args) -> None:
+        process_only = self.analysis_filter_mode.currentData() == "process_only"
+        for key, check in self.analysis_module_checks.items():
+            if process_only:
+                check.setChecked(key == "process_relationships")
+                check.setEnabled(key == "process_relationships")
+            else:
+                check.setEnabled(
+                    key != "process_relationships" or not self._inspected_parameters.empty
+                )
+        self.code_selection_list.setEnabled(
+            self.analysis_filter_mode.currentData() != "all"
+        )
+        self._update_analysis_selection_preview()
+
+    def _filter_target_code_list(self, text: str) -> None:
+        needle = text.strip().lower()
+        enabled_sources = {
+            source for source, check in self.code_source_checks.items() if check.isChecked()
+        }
+        enabled_scopes = {
+            scope for scope, check in self.analysis_scope_checks.items() if check.isChecked()
+        }
+        for index in range(self.code_selection_list.count()):
+            item = self.code_selection_list.item(index)
+            data = item.data(Qt.UserRole) or {}
+            item_scopes = set(map(str, data.get("analysis_scopes", ())))
+            item.setHidden(
+                (needle and needle not in item.text().lower())
+                or str(data.get("source_type")) not in enabled_sources
+                or not (item_scopes & enabled_scopes)
+            )
+
+    def _selected_target_codes(self) -> tuple[str, ...]:
+        values = []
+        enabled_sources = {
+            source for source, check in self.code_source_checks.items() if check.isChecked()
+        }
+        enabled_scopes = {
+            scope for scope, check in self.analysis_scope_checks.items() if check.isChecked()
+        }
+        for index in range(self.code_selection_list.count()):
+            item = self.code_selection_list.item(index)
+            if item.checkState() == Qt.Checked:
+                data = item.data(Qt.UserRole) or {}
+                if (
+                    str(data.get("source_type")) not in enabled_sources
+                    or not (set(map(str, data.get("analysis_scopes", ()))) & enabled_scopes)
+                ):
+                    continue
+                values.append(code_target_key(data.get("source_type"), data.get("canonical_code")))
+        return tuple(dict.fromkeys(values))
+
+    def _selected_process_parameters(self) -> tuple[str, ...]:
+        if self.parameter_mode_combo.currentData() == "all":
+            return ()
+        return tuple(
+            self.parameter_selection_list.item(index).text()
+            for index in range(self.parameter_selection_list.count())
+            if self.parameter_selection_list.item(index).checkState() == Qt.Checked
+        )
+
+    def _current_analysis_selection(self) -> AnalysisSelection:
+        return AnalysisSelection(
+            mode=str(self.analysis_filter_mode.currentData()),
+            scopes=tuple(
+                scope for scope, check in self.analysis_scope_checks.items() if check.isChecked()
+            ),
+            code_sources=tuple(
+                source for source, check in self.code_source_checks.items() if check.isChecked()
+            ),
+            defect_codes=self._selected_target_codes(),
+            modules=tuple(
+                module for module, check in self.analysis_module_checks.items() if check.isChecked()
+            ),
+            process_parameters=self._selected_process_parameters(),
+        )
+
+    def _update_analysis_selection_preview(self, *_args) -> None:
+        if not hasattr(self, "analysis_selection_preview"):
+            return
+        selection = self._current_analysis_selection()
+        scope_products = self.loaded_products
+        if not scope_products.empty and "analysis_scope" in scope_products:
+            scope_products = scope_products[
+                scope_products["analysis_scope"].astype(str).isin(selection.scopes)
+            ]
+        total = (
+            len(scope_products)
+            if not scope_products.empty and "dmc_raw" in scope_products else 0
+        )
+        if total == 0 and not self._inspected_all_codes.empty:
+            population = self._inspected_all_codes.loc[
+                self._inspected_all_codes["analysis_scope"].astype(str).isin(selection.scopes),
+                ["analysis_scope", "dmc_raw"],
+            ].astype(str).drop_duplicates()
+            total = len(population)
+        counts = []
+        for target in selection.defect_codes:
+            source, _, code = target.partition(":")
+            rows = self._inspected_codes[
+                self._inspected_codes.get("source_type", pd.Series(dtype=str)).astype(str).eq(source)
+                & self._inspected_codes.get("canonical_code", pd.Series(dtype=str)).astype(str).eq(code)
+                & self._inspected_codes.get("analysis_scope", pd.Series(dtype=str)).astype(str).isin(selection.scopes)
+            ] if not self._inspected_codes.empty else pd.DataFrame()
+            target_count = (
+                len(rows[["analysis_scope", "dmc_raw"]].astype(str).drop_duplicates())
+                if not rows.empty else 0
+            )
+            counts.append(f"{target}={target_count}件")
+        parameter_count = (
+            len(selection.process_parameters)
+            if selection.process_parameters else max(0, len(self._inspected_parameters.columns) - 1)
+        )
+        needs_images = bool({"image_patterns", "code_image"} & set(selection.modules))
+        detail = "、".join(counts) if counts else "全部可用缺陷"
+        self.analysis_selection_preview.setText(
+            f"总体约{total}个产品；目标：{detail}；工艺参数{parameter_count}个；"
+            f"{'需要图片' if needs_images else '无需图片'}。"
+        )
+        self._filter_target_code_list(self.code_search_edit.text())
+
+    def _populate_analysis_target_filters(self, valid: bool) -> None:
+        preserve = self.analysis_target_group.isEnabled()
+        previous_codes = set(self._selected_target_codes()) if preserve else set()
+        previous_parameters = set(self._selected_process_parameters()) if preserve else set()
+        previous_parameter_mode = self.parameter_mode_combo.currentData()
+        previous_scopes = {
+            scope for scope, check in self.analysis_scope_checks.items() if check.isChecked()
+        }
+        previous_sources = {
+            source for source, check in self.code_source_checks.items() if check.isChecked()
+        }
+        previous_modules = {
+            module for module, check in self.analysis_module_checks.items() if check.isChecked()
+        }
+        self._inspected_codes = pd.DataFrame()
+        self._inspected_all_codes = pd.DataFrame()
+        self._inspected_parameters = pd.DataFrame()
+        if self.station_workbook is not None:
+            catalog = load_defect_catalog(
+                self.project_root / "config/defect_code_catalog.csv",
+                Path(self.catalog_edit.text().strip()) if self.catalog_edit.text().strip() else None,
+            )
+            normalized = normalize_defect_codes(self.station_workbook.events, catalog)
+            self._inspected_all_codes = normalized.copy()
+            self._inspected_codes = normalized[
+                normalized["code_status"].isin(["defect", "state_code_conflict"])
+            ].copy()
+            self._inspected_parameters = process_parameter_frame(self.station_workbook)
+        mode_scopes = (
+            ("5S", "5X", "7S", "7X") if self.task_mode_combo.currentData() == "full_process"
+            else (str(self.scope_combo.currentData()),)
+        )
+        available_scopes = set(
+            self._inspected_codes.get("analysis_scope", pd.Series(dtype=str)).dropna().astype(str)
+        ) | set(
+            self.loaded_products.get("analysis_scope", pd.Series(dtype=str)).dropna().astype(str)
+        ) | set(
+            self.loaded_products.get("camera", pd.Series(dtype=str)).dropna().astype(str).str.upper()
+        )
+        for scope, check in self.analysis_scope_checks.items():
+            enabled = scope in mode_scopes and (not available_scopes or scope in available_scopes)
+            check.setEnabled(enabled)
+            check.setChecked(enabled and (not preserve or scope in previous_scopes))
+        for source, check in self.code_source_checks.items():
+            check.setChecked(not preserve or source in previous_sources)
+        self.code_selection_list.blockSignals(True)
+        self.code_selection_list.clear()
+        if not self._inspected_codes.empty:
+            grouped = self._inspected_codes.groupby(
+                ["source_type", "canonical_code"], dropna=False,
+            )
+            for (source, code), rows in grouped:
+                scopes = tuple(sorted(rows["analysis_scope"].dropna().astype(str).unique()))
+                names = " / ".join(dict.fromkeys(
+                    value for value in rows["defect_name"].dropna().astype(str) if value
+                )) or "未命名缺陷"
+                item = QListWidgetItem(
+                    f"{code}｜{names}｜{'AOI' if source == 'AOI_FAILURE' else 'VI'}｜"
+                    f"{'/'.join(scopes)}｜{rows['dmc_raw'].astype(str).nunique()}件"
+                )
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.Checked if code_target_key(source, code) in previous_codes else Qt.Unchecked
+                )
+                item.setData(Qt.UserRole, {
+                    "analysis_scopes": scopes, "source_type": str(source),
+                    "canonical_code": str(code),
+                })
+                self.code_selection_list.addItem(item)
+        self.code_selection_list.blockSignals(False)
+        self.parameter_selection_list.blockSignals(True)
+        self.parameter_selection_list.clear()
+        for column in self._inspected_parameters.select_dtypes(include="number").columns:
+            item = QListWidgetItem(str(column)); item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if not preserve or str(column) in previous_parameters else Qt.Unchecked
+            )
+            self.parameter_selection_list.addItem(item)
+        self.parameter_selection_list.blockSignals(False)
+        self.parameter_mode_combo.setCurrentIndex(
+            max(0, self.parameter_mode_combo.findData(previous_parameter_mode))
+        )
+        has_parameters = self.parameter_selection_list.count() > 0
+        self.analysis_module_checks["process_relationships"].setEnabled(has_parameters)
+        self.analysis_module_checks["process_relationships"].setChecked(has_parameters)
+        has_images = not self.analysis_products.empty
+        for module in ("image_patterns", "code_image"):
+            self.analysis_module_checks[module].setChecked(has_images)
+            self.analysis_module_checks[module].setEnabled(has_images)
+        self.analysis_module_checks["code_patterns"].setChecked(not self._inspected_codes.empty)
+        self.analysis_module_checks["code_patterns"].setEnabled(not self._inspected_codes.empty)
+        if preserve:
+            for module, check in self.analysis_module_checks.items():
+                if check.isEnabled():
+                    check.setChecked(module in previous_modules)
+        self.analysis_target_group.setEnabled(valid)
+        self._analysis_mode_changed()
+
     def _inspect_products(self) -> bool:
         try:
             legacy_text = self.products_edit.text().strip()
             if legacy_text:
+                self.station_workbook = None
                 path = Path(legacy_text)
                 if not path.is_file():
                     raise FileNotFoundError(f"旧版产品清单不存在：{path}")
@@ -864,6 +1173,7 @@ class MainWindow(QMainWindow):
             self.quality_summary.setObjectName(object_name)
             self.quality_summary.style().unpolish(self.quality_summary)
             self.quality_summary.style().polish(self.quality_summary)
+            self._populate_analysis_target_filters(report.is_valid)
             self.tabs.setCurrentIndex(1)
             return report.is_valid
         except Exception as exc:
@@ -898,8 +1208,46 @@ class MainWindow(QMainWindow):
             self.use_current_excel.setEnabled(False)
             self.use_current_excel.setChecked(False)
             excel_path = Path(self.source_excel_edit.text().strip()) if self.source_excel_edit.text().strip() else None
+            selection = self._current_analysis_selection()
+            if not selection.scopes:
+                raise ValueError("请至少选择一个工站范围")
+            if not selection.code_sources:
+                raise ValueError("请至少选择一个缺陷代码来源")
+            if not selection.modules:
+                raise ValueError("请至少选择一项分析内容")
+            if selection.mode in {"selected_codes", "process_only"} and not selection.defect_codes:
+                raise ValueError("当前分析方式要求至少选择一个缺陷代码")
+            if (
+                "process_relationships" in selection.modules
+                and self._inspected_parameters.empty
+            ):
+                raise ValueError("当前Excel没有可用于关联分析的WP1-WP5数值工艺参数")
+            if (
+                "process_relationships" in selection.modules
+                and self.parameter_mode_combo.currentData() == "selected"
+                and not selection.process_parameters
+            ):
+                raise ValueError("请选择至少一个工艺参数，或改为自动分析全部数值参数")
+            image_modules = {"image_patterns", "code_image"} & set(selection.modules)
+            scoped_analysis_products = self.analysis_products
+            if not scoped_analysis_products.empty and "analysis_scope" in scoped_analysis_products:
+                scoped_analysis_products = scoped_analysis_products[
+                    scoped_analysis_products["analysis_scope"].astype(str).isin(selection.scopes)
+                ].copy()
+            if image_modules:
+                scope_column = (
+                    "analysis_scope" if "analysis_scope" in scoped_analysis_products else "camera"
+                )
+                available = set(scoped_analysis_products[scope_column].astype(str).str.upper())
+                missing_scopes = sorted(set(selection.scopes) - available)
+                if missing_scopes:
+                    raise ValueError(
+                        "图片分析缺少有效主图对的工站：" + "、".join(missing_scopes)
+                    )
+            pure_excel = not image_modules
             if (
                 excel_path is not None and self.station_workbook is None
+                and not pure_excel
                 and not (self.excel_page.thread and self.excel_page.thread.isRunning())
             ):
                 station = self.station_catalog.station(str(self.station_combo.currentData()))
@@ -908,44 +1256,49 @@ class MainWindow(QMainWindow):
                 self.excel_page.output_edit.setText(str(output))
                 self.excel_page.task_name.setText(self.task_edit.text())
                 self.excel_page.start_analysis()
-            if self.analysis_products.empty:
-                if excel_path is not None:
-                    if self.station_workbook is not None:
-                        self.statusBar().showMessage(
-                            "全流程Excel已完成解析；未提供有效图片目录，本次不运行图片规律分析", 10000
-                        )
-                        self.tabs.setCurrentIndex(1)
-                    else:
-                        self.statusBar().showMessage("未找到完整主图对，已启动Excel分析", 8000)
-                        self.tabs.setCurrentIndex(4)
-                    return
-                raise ValueError("没有可运行图片算法的完整主图对")
             legacy_path = Path(self.products_edit.text().strip()) if self.products_edit.text().strip() else None
             source_files = (excel_path,) if excel_path is not None else ()
-            request = AnalysisRequest(
-                legacy_path, config_path, output, self.task_edit.text(),
-                Path(self.image_root_edit.text()) if self.image_root_edit.text().strip() else None,
-                dict(self.config_snapshot),
-                products_frame=None if legacy_path is not None else self.analysis_products,
-                source_files=source_files,
-                source_index_frame=None if legacy_path is not None else self.loaded_products,
-                source_issues_frame=None if self._station_issues.empty else self._station_issues,
-                analysis_mode=str(self.task_mode_combo.currentData()),
-                enabled_scopes=tuple(self.analysis_products["analysis_scope"].drop_duplicates())
-                    if "analysis_scope" in self.analysis_products else (),
-                image_roots={
-                    scope: Path(edit.text().strip()) for scope, edit in self.scope_image_edits.items()
-                    if edit.text().strip()
-                },
-                station_events_frame=(
-                    self.station_workbook.events if self.station_workbook is not None else None
-                ),
-                defect_catalog_path=(
-                    Path(self.catalog_edit.text().strip())
-                    if hasattr(self, "catalog_edit") and self.catalog_edit.text().strip() else None
-                ),
+            catalog_path = (
+                Path(self.catalog_edit.text().strip())
+                if hasattr(self, "catalog_edit") and self.catalog_edit.text().strip() else None
             )
-            self._auto_relationship_pending = excel_path is not None
+            if pure_excel:
+                if self.station_workbook is None or excel_path is None:
+                    raise ValueError("纯Excel代码规律或工艺关联需要可识别的全工站Excel工作簿")
+                request = ExcelTargetAnalysisRequest(
+                    config_path=config_path, output_parent=output,
+                    task_name=self.task_edit.text(),
+                    station_events_frame=self.station_workbook.events,
+                    process_parameters_frame=self._inspected_parameters,
+                    selection=selection, source_files=source_files,
+                    config_snapshot=dict(self.config_snapshot),
+                    defect_catalog_path=catalog_path,
+                )
+                self._auto_relationship_pending = False
+            else:
+                request = AnalysisRequest(
+                    legacy_path, config_path, output, self.task_edit.text(),
+                    Path(self.image_root_edit.text()) if self.image_root_edit.text().strip() else None,
+                    dict(self.config_snapshot),
+                    products_frame=None if legacy_path is not None else scoped_analysis_products,
+                    source_files=source_files,
+                    source_index_frame=None if legacy_path is not None else self.loaded_products,
+                    source_issues_frame=None if self._station_issues.empty else self._station_issues,
+                    analysis_mode=str(self.task_mode_combo.currentData()),
+                    enabled_scopes=selection.scopes,
+                    image_roots={
+                        scope: Path(edit.text().strip()) for scope, edit in self.scope_image_edits.items()
+                        if edit.text().strip()
+                    },
+                    station_events_frame=(
+                        self.station_workbook.events if self.station_workbook is not None else None
+                    ),
+                    defect_catalog_path=catalog_path,
+                    selection=selection,
+                )
+                self._auto_relationship_pending = (
+                    excel_path is not None and "process_relationships" in selection.modules
+                )
         except Exception as exc:
             self._show_error("无法启动分析", exc)
             return
@@ -1030,6 +1383,15 @@ class MainWindow(QMainWindow):
         self.attribution_widget.set_frame(result.frames.get("station_attribution", pd.DataFrame()))
         normalized_codes = result.frames.get("normalized_codes", pd.DataFrame())
         self._populate_defect_code_filter(normalized_codes)
+        selected_targets = result.summary.get("analysis_selection", {}).get("defect_codes", [])
+        if selected_targets:
+            first_code = str(selected_targets[0]).partition(":")[2]
+            index = next((
+                item for item in range(self.defect_code_filter.count())
+                if str(self.defect_code_filter.itemData(item) or "") == first_code
+            ), -1)
+            if index >= 0:
+                self.defect_code_filter.setCurrentIndex(index)
         cooccurrence.to_csv(
             result.output_dir / "defect_cooccurrence.csv", index=False, encoding="utf-8-sig"
         )
@@ -1059,11 +1421,37 @@ class MainWindow(QMainWindow):
         self.workbench.header.set_run_state("分析完成", "success")
         self._set_outcome_banner(
             self.result_outcome,
-            f"✓ 分析任务已完成　结果已保存至：{result.output_dir}",
+            (
+                f"✓ 纯Excel目标分析已完成（未运行图片分析）　结果已保存至：{result.output_dir}"
+                if not result.summary.get("image_analysis_executed", True)
+                else f"✓ 分析任务已完成　结果已保存至：{result.output_dir}"
+            ),
             "success",
         )
+        if not result.summary.get("image_analysis_executed", True):
+            self._show_process_result_frames(result)
         self.tabs.setCurrentIndex(3)
         self._maybe_auto_relationship()
+
+    def _show_process_result_frames(self, result: AnalysisResult) -> None:
+        self.relationship_metrics.set_frame(result.frames.get("process_metrics", pd.DataFrame()))
+        self.relationship_bins.set_frame(result.frames.get("process_bins", pd.DataFrame()))
+        self.relationship_model.set_frame(result.frames.get("process_models", pd.DataFrame()))
+        summaries = result.summary.get("relationship_targets", [])
+        if summaries:
+            lines = [
+                f"{item['analysis_scope']} {item['target']}：匹配{item['matched_count']}/"
+                f"{item['product_count']}，正样本{item['defective_product_count']}，"
+                f"参数{item['parameter_count']}，验证{item['validation_method']}，"
+                f"AUC {item['validation_auc'] if item['validation_auc'] is not None else '-'}"
+                for item in summaries
+            ]
+            self.relationship_summary.setText("；".join(lines))
+        else:
+            self.relationship_summary.setText("本任务未生成工艺参数关联结果。")
+        joined = result.frames.get("process_joined", pd.DataFrame())
+        if not joined.empty:
+            self.review.set_process_data(joined)
 
     def _maybe_auto_relationship(self) -> None:
         """统一工站任务的Excel和图片都完成后自动关联。"""
@@ -1273,7 +1661,8 @@ class MainWindow(QMainWindow):
         self.code_conflict_widget.set_frame(conflicts)
         self.trajectory_widget.set_frame(trajectories)
         self.attribution_widget.set_frame(attribution)
-        self.review.set_data(view.products, view.extracted, self._result_config)
+        if self.current_result.summary.get("image_analysis_executed", True):
+            self.review.set_data(view.products, view.extracted, self._result_config)
         if self.station_workbook is not None:
             self.review.set_station_history(
                 self.station_workbook.events,
@@ -1449,6 +1838,10 @@ class MainWindow(QMainWindow):
                     parameters = pd.read_csv(path)
             products_frame = self.current_result.frames["products"]
             extracted_frame = self.current_result.frames["extracted"]
+            selection_data = self.current_result.summary.get("analysis_selection", {})
+            selection_mode = str(selection_data.get("mode", "all"))
+            selected_target_keys = set(map(str, selection_data.get("defect_codes", [])))
+            selected_parameters = tuple(map(str, selection_data.get("process_parameters", [])))
             relationship_results: list[tuple[str, str, Any]] = []
             scopes = (
                 products_frame["analysis_scope"].dropna().astype(str).drop_duplicates().tolist()
@@ -1463,7 +1856,10 @@ class MainWindow(QMainWindow):
                     extracted_frame[extracted_frame["analysis_scope"].astype(str).eq(scope)]
                     if "analysis_scope" in extracted_frame else extracted_frame
                 )
-                targets: list[tuple[str, pd.DataFrame]] = [("图片算法检出", scope_defects)]
+                targets: list[tuple[str, str, str, pd.DataFrame]] = (
+                    [("图片算法检出", "IMAGE", "", scope_defects)]
+                    if selection_mode == "all" else []
+                )
                 normalized = self.current_result.frames.get("normalized_codes", pd.DataFrame())
                 if not normalized.empty:
                     scope_codes = normalized[
@@ -1473,23 +1869,26 @@ class MainWindow(QMainWindow):
                     for (source_type, code), code_group in scope_codes.groupby(
                         ["source_type", "canonical_code"]
                     ):
+                        target_key = code_target_key(source_type, code)
+                        if selected_target_keys and target_key not in selected_target_keys:
+                            continue
                         dmcs = set(code_group["dmc_raw"].astype(str))
                         orders = scope_products.loc[
                             scope_products["dmc_raw"].astype(str).isin(dmcs), "global_order"
                         ]
-                        if len(orders) >= 4:
+                        if len(orders) >= 4 or selection_mode != "all":
                             targets.append((
-                                f"{source_type}_{code}",
+                                target_key, str(source_type), str(code),
                                 pd.DataFrame({"global_order": orders, "component_area": 1}),
                             ))
-                if "trajectory_id" in scope_defects:
+                if selection_mode == "all" and "trajectory_id" in scope_defects:
                     for trajectory_id, trajectory_group in scope_defects[
                         scope_defects["trajectory_id"].fillna("").astype(str).str.strip().ne("")
                     ].groupby("trajectory_id"):
                         orders = trajectory_group["global_order"].drop_duplicates()
                         if len(orders) >= 4:
                             targets.append((
-                                f"TRAJECTORY_{trajectory_id}",
+                                f"TRAJECTORY_{trajectory_id}", "IMAGE", "",
                                 pd.DataFrame({"global_order": orders, "component_area": 1}),
                             ))
                 for label, column, expected in (
@@ -1497,8 +1896,9 @@ class MainWindow(QMainWindow):
                 ):
                     if column in scope_products:
                         orders = scope_products.loc[scope_products[column].astype(str).eq(expected), "global_order"]
-                        targets.append((label, pd.DataFrame({"global_order": orders, "component_area": 1})))
-                if "vi_defect_code" in scope_products:
+                        if selection_mode == "all":
+                            targets.append((label, label.split("_")[0], "", pd.DataFrame({"global_order": orders, "component_area": 1})))
+                if selection_mode == "all" and "vi_defect_code" in scope_products:
                     codes = scope_products["vi_defect_code"].fillna("").astype(str).str.split(";").explode()
                     codes = codes[codes.str.strip().ne("")].str.strip()
                     for code, count in codes.value_counts().items():
@@ -1508,37 +1908,44 @@ class MainWindow(QMainWindow):
                             lambda values, target=code: target in values
                         )
                         orders = scope_products.loc[has_code, "global_order"]
-                        targets.append((f"VI_CODE_{code}", pd.DataFrame({"global_order": orders, "component_area": 1})))
-                for target_name, target_defects in targets:
-                    relationship_results.append((scope, target_name, analyze_process_relationships(
+                        targets.append((f"VI_CODE_{code}", "VI_BLOCK", str(code), pd.DataFrame({"global_order": orders, "component_area": 1})))
+                for target_name, source_type, canonical_code, target_defects in targets:
+                    relationship_results.append((scope, target_name, source_type, canonical_code, analyze_process_relationships(
                         scope_products, target_defects, parameters, self.time_tolerance.value(),
+                        selected_parameters=selected_parameters,
                     )))
-            scope, target_name, result = relationship_results[0]
+            if not relationship_results:
+                raise ValueError("所选缺陷代码在当前图片产品总体中没有足够的可关联样本")
+            scope, target_name, _source_type, _canonical_code, result = relationship_results[0]
             metric_parts = []
             bin_parts = []
             model_parts = []
             summary_rows = []
-            for scope_name, target, item in relationship_results:
+            for scope_name, target, source_type, canonical_code, item in relationship_results:
                 for parts, frame in ((metric_parts, item.parameter_metrics), (bin_parts, item.binned_rates), (model_parts, item.model_importance)):
                     enriched = frame.copy()
                     enriched.insert(0, "target", target)
+                    enriched.insert(0, "canonical_code", canonical_code)
+                    enriched.insert(0, "source_type", source_type)
                     enriched.insert(0, "analysis_scope", scope_name)
                     parts.append(enriched)
-                summary_rows.append({"analysis_scope": scope_name, "target": target, **item.summary})
+                summary_rows.append({
+                    "analysis_scope": scope_name, "source_type": source_type,
+                    "canonical_code": canonical_code, "target": target, **item.summary,
+                })
             combined_metrics = pd.concat(metric_parts, ignore_index=True)
             combined_bins = pd.concat(bin_parts, ignore_index=True)
             combined_models = pd.concat(model_parts, ignore_index=True)
             self.relationship_metrics.set_frame(combined_metrics)
             self.relationship_bins.set_frame(combined_bins)
             self.relationship_model.set_frame(combined_models)
-            summary = result.summary
-            self.relationship_summary.setText(
-                f"关联键：{summary['join_key']}；匹配：{summary['matched_count']}/"
-                f"{summary['product_count']}（{summary['match_rate']:.1%}）；"
-                f"参数：{summary['parameter_count']}；缺陷产品："
-                f"{summary['defective_product_count']}；验证：{summary['validation_method']}；"
-                f"AUC：{summary['validation_auc'] if summary['validation_auc'] is not None else '-'}"
-            )
+            self.relationship_summary.setText("；".join(
+                f"{item['analysis_scope']} {item['target']}：匹配{item['matched_count']}/"
+                f"{item['product_count']}，正样本{item['defective_product_count']}，"
+                f"参数{item['parameter_count']}，验证{item['validation_method']}，"
+                f"AUC {item['validation_auc'] if item['validation_auc'] is not None else '-'}"
+                for item in summary_rows
+            ))
             output = self.current_result.output_dir
             combined_metrics.to_csv(
                 output / "process_parameter_metrics.csv", index=False, encoding="utf-8-sig"

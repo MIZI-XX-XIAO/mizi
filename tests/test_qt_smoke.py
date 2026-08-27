@@ -18,6 +18,7 @@ from gui.main_window import MainWindow  # noqa: E402
 from gui.parameter_dialog import ParameterDialog  # noqa: E402
 from gui.workbench import LayoutProfile, WorkbenchStack, resolve_layout_profile  # noqa: E402
 from src.result_views import ResultView  # noqa: E402
+from src.station_workbook import StationWorkbookData  # noqa: E402
 
 
 def test_main_window_starts(qtbot) -> None:
@@ -36,6 +37,8 @@ def test_main_window_starts(qtbot) -> None:
     assert window.defect_code_filter.isEditable()
     assert not window.code_list_button.isEnabled()
     assert window.findChild(QPushButton, "mesDownloadButton") is not None
+    assert window.findChild(type(window.analysis_target_group), "analysisTargetGroup") is not None
+    assert not window.analysis_target_group.isEnabled()
     normalized_codes = pd.DataFrame([
         {"canonical_code": "5011", "defect_name": "折皱", "code_status": "defect"},
         {"canonical_code": "5050", "defect_name": "白点", "code_status": "defect"},
@@ -59,6 +62,50 @@ def test_main_window_starts(qtbot) -> None:
     assert window._selected_defect_codes() == set()
     window.close()
     window.deleteLater()
+
+
+def test_task_target_filter_populates_codes_and_parameters_after_inspection(qtbot) -> None:
+    window = MainWindow(Path(__file__).resolve().parents[1])
+    qtbot.addWidget(window)
+    events = pd.DataFrame([
+        {
+            "event_id": f"A{order}", "dmc_raw": f"DMC-{order}",
+            "station_id": "35_5s_aoi", "test_date": f"2026-08-01 10:0{order}:00",
+            "state": "NOK", "source_sheet": "AOI", "source_row": order + 1,
+            "production_order": order, "Result.AOIFailureCode": "501100000000",
+        }
+        for order in range(1, 5)
+    ])
+    parameters = pd.DataFrame([
+        {
+            "event_id": f"P{order}", "dmc_raw": f"DMC-{order}",
+            "station_id": "35_wp1", "test_date": f"2026-08-01 09:0{order}:00",
+            "parameter_name": "Result.Force", "numeric_value": float(order),
+        }
+        for order in range(1, 5)
+    ])
+    window.station_workbook = StationWorkbookData(
+        products=pd.DataFrame({"dmc_raw": [f"DMC-{order}" for order in range(1, 5)]}),
+        events=events, parameters=parameters, package=pd.DataFrame(),
+    )
+
+    window._populate_analysis_target_filters(True)
+    window.analysis_filter_mode.setCurrentIndex(
+        window.analysis_filter_mode.findData("selected_codes")
+    )
+    window.code_selection_list.item(0).setCheckState(Qt.Checked)
+
+    selection = window._current_analysis_selection()
+    assert window.analysis_target_group.isEnabled()
+    assert window.code_selection_list.count() == 1
+    assert window.parameter_selection_list.count() == 1
+    assert selection.defect_codes == ("AOI_FAILURE:5011",)
+    assert selection.scopes == ("5S",)
+    assert not window.analysis_module_checks["image_patterns"].isChecked()
+    assert window.analysis_module_checks["process_relationships"].isChecked()
+    window._populate_analysis_target_filters(True)
+    assert window._current_analysis_selection().defect_codes == ("AOI_FAILURE:5011",)
+    window.close(); window.deleteLater()
 
 
 def test_mes_download_dialog_opens_from_workbook_row(qtbot) -> None:

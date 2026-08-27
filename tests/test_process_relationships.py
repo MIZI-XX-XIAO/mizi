@@ -52,3 +52,21 @@ def test_process_relationship_time_matching_marks_quality() -> None:
     result = analyze_process_relationships(products, defects, parameters, tolerance_seconds=15)
     assert result.summary["matched_count"] == 5
     assert set(result.joined["match_quality"]) == {"time_nearest"}
+
+
+def test_process_relationship_limits_metrics_to_selected_parameters() -> None:
+    products = pd.DataFrame({
+        "global_order": range(1, 9),
+        "dmc_raw": [f"DMC-{order}" for order in range(1, 9)],
+    })
+    parameters = pd.DataFrame({
+        "dmc_raw": products["dmc_raw"],
+        "temperature": range(8), "pressure": range(10, 18),
+    })
+    defects = pd.DataFrame({"global_order": [2, 4, 6, 8], "component_area": 1})
+
+    result = analyze_process_relationships(
+        products, defects, parameters, selected_parameters=("pressure",),
+    )
+
+    assert result.parameter_metrics["参数"].tolist() == ["pressure"]

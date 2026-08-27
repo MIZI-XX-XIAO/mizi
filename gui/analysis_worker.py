@@ -7,8 +7,9 @@ from src.analysis_service import (
     AnalysisRequest,
     AnalysisResult,
     CancellationToken,
+    ExcelTargetAnalysisRequest,
     ProgressEvent,
-    run_analysis_task,
+    run_analysis_task, run_excel_target_task,
 )
 
 
@@ -20,7 +21,7 @@ class AnalysisWorker(QObject):
     cancelled = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, request: AnalysisRequest) -> None:
+    def __init__(self, request: AnalysisRequest | ExcelTargetAnalysisRequest) -> None:
         super().__init__()
         self.request = request
         self.token = CancellationToken()
@@ -33,7 +34,11 @@ class AnalysisWorker(QObject):
             on_alert=self.alert_created.emit,
         )
         try:
-            result = run_analysis_task(self.request, callbacks, self.token)
+            result = (
+                run_excel_target_task(self.request, callbacks, self.token)
+                if isinstance(self.request, ExcelTargetAnalysisRequest)
+                else run_analysis_task(self.request, callbacks, self.token)
+            )
             if result.status == "cancelled":
                 self.cancelled.emit(result)
             else:

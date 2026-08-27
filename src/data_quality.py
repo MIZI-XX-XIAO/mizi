@@ -37,12 +37,12 @@ class DataQualityReport:
         return pd.DataFrame(rows, columns=["级别", "项目", "结果"])
 
 
-def validate_products(frame: pd.DataFrame) -> DataQualityReport:
+def validate_products(frame: pd.DataFrame, require_images: bool = True) -> DataQualityReport:
     report = DataQualityReport("产品表", len(frame), len(frame.columns))
-    required = {"global_order", "camera", "e_image_path"}
+    required = {"global_order"} | ({"camera", "e_image_path"} if require_images else set())
     if missing := required - set(frame.columns):
         report.errors.append(f"缺少必需字段：{', '.join(sorted(missing))}")
-    if "a_image_path" not in frame and "v_image_path" not in frame:
+    if require_images and "a_image_path" not in frame and "v_image_path" not in frame:
         report.errors.append("缺少A图路径字段 a_image_path（兼容字段为 v_image_path）")
     if frame.empty:
         report.errors.append("产品表为空")

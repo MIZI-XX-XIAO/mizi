@@ -7,7 +7,7 @@
 
 界面采用七个工作模块：
 
-1. 新建任务：选择工站、Excel工作簿、图片根目录、结果目录和分析参数。
+1. 新建任务：选择工站、Excel工作簿、图片根目录、结果目录，并在数据检查后按AOI/VI来源、缺陷代码、分析模块和工艺参数限定本次分析目标。
 2. 数据检查：校验Excel的Location(s)，并检查DMC匹配、多视图覆盖、重复图和缺图。
 3. 执行分析：后台提取缺陷并显示进度、资源使用、预计时间和实时告警。
 4. 结果概览：分别查看代码规律、图片空间规律或二者联合规律，支持AOI/VI来源、单个或多个缺陷代码筛选。
@@ -16,6 +16,8 @@
 7. 图片复核：查看 A图、E图、差异图和Mask，支持检测框、同步缩放拖动、缺陷导航及局部原图。
 
 窗口会适配常见办公电脑分辨率和 Windows DPI 缩放，并记忆窗口、路径、表格列宽及复核布局。
+
+“指定缺陷代码分析”支持同时选择多个代码，各代码分别建立目标组和工艺关联结果；未出现目标代码的产品仍保留为完整生产序列和正常对照。只选择代码时序规律或工艺参数关联时可以不提供图片目录，程序直接执行纯Excel目标分析。
 
 ## 输入数据
 
@@ -81,7 +83,7 @@ $env:MEA5S_REAL_DATA_ROOT="D:\本地数据\dataset_realistic"
 - `code_spatial_associations.csv`、`code_label_conflicts.csv`
 - `station_attribution.csv`
 - `analysis_summary.json`、`analysis_config_snapshot.yaml`
-- `task_manifest.json`、`visualizations/`
+- `task_manifest.json`、`analysis_selection.json`、`visualizations/`
 - `defect_cooccurrence.csv`、`defect_transitions.csv`
 
 执行工艺关联后还会生成：
@@ -89,6 +91,7 @@ $env:MEA5S_REAL_DATA_ROOT="D:\本地数据\dataset_realistic"
 - `process_parameter_metrics.csv`
 - `process_parameter_binned_rates.csv`
 - `process_model_importance.csv`
+- `process_joined.csv`（纯Excel目标任务）
 - `process_relationship_summary.json`
 
 执行Excel质量分析会生成：

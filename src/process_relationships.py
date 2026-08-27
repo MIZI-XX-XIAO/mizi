@@ -131,10 +131,11 @@ def analyze_process_relationships(
     defects: pd.DataFrame,
     parameters: pd.DataFrame,
     tolerance_seconds: int = 60,
+    selected_parameters: tuple[str, ...] | list[str] | None = None,
 ) -> ProcessRelationshipResult:
     if "detection_type" in defects:
         defects = defects[defects["detection_type"] != "region_anomaly"].copy()
-    product_report = validate_products(products)
+    product_report = validate_products(products, require_images=False)
     parameter_report = validate_process_parameters(parameters)
     if not product_report.is_valid:
         raise ValueError("产品表校验失败：" + "；".join(product_report.errors))
@@ -155,6 +156,9 @@ def analyze_process_relationships(
         column for column in parameters.select_dtypes(include="number").columns
         if column not in excluded and column in joined
     ]
+    if selected_parameters:
+        requested = {str(column) for column in selected_parameters}
+        parameter_names = [column for column in parameter_names if column in requested]
     metric_rows: list[dict[str, Any]] = []
     bin_rows: list[dict[str, Any]] = []
     target = joined["has_detected_defect"]
@@ -212,6 +216,12 @@ def analyze_process_relationships(
         "parameter_count": len(parameter_names),
         "defective_product_count": int(joined["has_detected_defect"].sum()),
         "warning": "统计关联不等于因果关系；结论需结合工艺机理和受控实验验证。",
+        "statistical_status": (
+            "no_parameters" if not parameter_names
+            else "single_class" if joined["has_detected_defect"].nunique() < 2
+            else "low_positive_sample" if int(joined["has_detected_defect"].sum()) < 10
+            else "ok"
+        ),
         **model_summary,
     }
     return ProcessRelationshipResult(

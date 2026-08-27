@@ -30,9 +30,97 @@ from .defect_evidence import (
     load_defect_catalog, map_code_events_to_products, normalize_defect_codes,
 )
 from .pattern_analyzer import OnlinePatternEngine
+from .process_relationships import analyze_process_relationships
 
 
 STAGES = ("VALIDATING", "EXTRACTING", "ANALYZING", "WRITING", "VISUALIZING", "COMPLETE")
+
+ANALYSIS_MODULES = (
+    "code_patterns", "image_patterns", "code_image", "process_relationships",
+)
+
+
+@dataclass(frozen=True)
+class AnalysisSelection:
+    """User-selected analysis targets; empty tuples preserve legacy all-analysis behavior."""
+
+    mode: str = "all"
+    scopes: tuple[str, ...] = ()
+    code_sources: tuple[str, ...] = ()
+    defect_codes: tuple[str, ...] = ()
+    modules: tuple[str, ...] = ()
+    process_parameters: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "scopes": list(self.scopes),
+            "code_sources": list(self.code_sources),
+            "defect_codes": list(self.defect_codes),
+            "modules": list(self.modules),
+            "process_parameters": list(self.process_parameters),
+        }
+
+    def includes(self, module: str) -> bool:
+        return not self.modules or module in self.modules
+
+
+def code_target_key(source_type: Any, canonical_code: Any) -> str:
+    return f"{str(source_type).strip()}:{str(canonical_code).strip()}"
+
+
+def filter_selected_code_events(
+    normalized_codes: pd.DataFrame, selection: AnalysisSelection,
+) -> pd.DataFrame:
+    """Filter target events without filtering the complete product/control population."""
+    result = normalized_codes.copy()
+    if result.empty:
+        return result
+    if selection.scopes:
+        result = result[result["analysis_scope"].astype(str).isin(selection.scopes)]
+    if selection.code_sources:
+        result = result[result["source_type"].astype(str).isin(selection.code_sources)]
+    if selection.mode in {"selected_codes", "process_only"} and selection.defect_codes:
+        keys = result.apply(
+            lambda row: code_target_key(row.get("source_type"), row.get("canonical_code")), axis=1
+        )
+        result = result[keys.isin(selection.defect_codes)]
+    return result.reset_index(drop=True)
+
+
+def discover_selected_code_patterns(
+    normalized_codes: pd.DataFrame,
+    selection: AnalysisSelection,
+    config: dict[str, Any],
+    image_links: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Analyze selected source/code targets separately while retaining normal sequence rows."""
+    if not selection.defect_codes or selection.mode == "all":
+        return discover_code_patterns(normalized_codes, config, image_links=image_links)
+    parts: list[pd.DataFrame] = []
+    for target in selection.defect_codes:
+        source, separator, code = target.partition(":")
+        if not separator or not code:
+            continue
+        population = normalized_codes[
+            normalized_codes["source_type"].astype(str).eq(source)
+        ]
+        if selection.scopes:
+            population = population[
+                population["analysis_scope"].astype(str).isin(selection.scopes)
+            ]
+        links = image_links
+        if links is not None and not links.empty and "source_type" in links:
+            links = links[links["source_type"].astype(str).eq(source)]
+        part = discover_code_patterns(
+            population, config, selected_codes=(code,), image_links=links,
+        )
+        if not part.empty:
+            parts.append(part)
+    return (
+        pd.concat(parts, ignore_index=True)
+        if parts else discover_code_patterns(normalized_codes.iloc[0:0], config)
+    )
 
 
 def _map_order_list(value: Any, order_mapping: dict[int, int]) -> str:
@@ -83,6 +171,20 @@ class AnalysisRequest:
     enabled_scopes: tuple[str, ...] = ()
     image_roots: dict[str, Path] = field(default_factory=dict)
     station_events_frame: pd.DataFrame | None = None
+    defect_catalog_path: Path | None = None
+    selection: AnalysisSelection = field(default_factory=AnalysisSelection)
+
+
+@dataclass(frozen=True)
+class ExcelTargetAnalysisRequest:
+    config_path: Path
+    output_parent: Path
+    task_name: str
+    station_events_frame: pd.DataFrame
+    process_parameters_frame: pd.DataFrame
+    selection: AnalysisSelection
+    config_snapshot: dict[str, Any] | None = None
+    source_files: tuple[Path, ...] = ()
     defect_catalog_path: Path | None = None
 
 
@@ -221,6 +323,254 @@ def validate_analysis_request(request: AnalysisRequest) -> tuple[pd.DataFrame, d
     return products, config, project_root, use_legacy
 
 
+def _excel_display_products(codes: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "global_order", "task_order", "scope_order", "production_order", "order_code",
+        "dmc_raw", "camera", "analysis_scope", "station_id", "production_timestamp",
+        "a_image_path", "e_image_path", "has_primary_pair",
+    ]
+    if codes.empty:
+        return pd.DataFrame(columns=columns)
+    base = codes.sort_values("production_order", na_position="last", kind="stable").copy()
+    base = base.drop_duplicates(["analysis_scope", "dmc_raw"], keep="last")
+    base = base.reset_index(drop=True)
+    base["global_order"] = range(1, len(base) + 1)
+    base["task_order"] = base["global_order"]
+    base["scope_order"] = base.groupby("analysis_scope").cumcount() + 1
+    base["order_code"] = base["dmc_raw"].astype(str)
+    base["camera"] = base["analysis_scope"].astype(str)
+    base["production_timestamp"] = pd.to_datetime(base["test_date"], errors="coerce")
+    base["a_image_path"] = ""
+    base["e_image_path"] = ""
+    base["has_primary_pair"] = False
+    return base[columns]
+
+
+def _target_relationship_population(
+    all_codes: pd.DataFrame, source: str, code: str, scope: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    population = all_codes[
+        all_codes["source_type"].astype(str).eq(source)
+        & all_codes["analysis_scope"].astype(str).eq(scope)
+    ].sort_values("production_order", na_position="last", kind="stable")
+    population = population.drop_duplicates("dmc_raw", keep="last").reset_index(drop=True)
+    products = pd.DataFrame({
+        "global_order": range(1, len(population) + 1),
+        "dmc_raw": population["dmc_raw"].astype(str),
+        "order_code": population["dmc_raw"].astype(str),
+        "camera": scope,
+        "analysis_scope": scope,
+        "production_timestamp": pd.to_datetime(population["test_date"], errors="coerce"),
+    })
+    target_dmcs = set(all_codes.loc[
+        all_codes["source_type"].astype(str).eq(source)
+        & all_codes["analysis_scope"].astype(str).eq(scope)
+        & all_codes["canonical_code"].astype(str).eq(code)
+        & all_codes["code_status"].isin(["defect", "state_code_conflict"]),
+        "dmc_raw",
+    ].astype(str))
+    target_orders = products.loc[products["dmc_raw"].isin(target_dmcs), "global_order"]
+    defects = pd.DataFrame({"global_order": target_orders, "component_area": 1})
+    return products, defects
+
+
+def run_excel_target_task(
+    request: ExcelTargetAnalysisRequest,
+    callbacks: AnalysisCallbacks | None = None,
+    cancellation_token: CancellationToken | None = None,
+) -> AnalysisResult:
+    """Run code-pattern and process-relationship targets without reading image files."""
+    callbacks = callbacks or AnalysisCallbacks()
+    token = cancellation_token or CancellationToken()
+    started = perf_counter()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    base_name = f"{_safe_task_name(request.task_name)}_{timestamp}"
+    work_dir = request.output_parent.resolve() / f".{base_name}.work"
+    final_dir = request.output_parent.resolve() / base_name
+    work_dir.mkdir(parents=False, exist_ok=False)
+    try:
+        callbacks.on_stage("VALIDATING")
+        if request.station_events_frame.empty:
+            raise ValueError("Excel中没有可分析的工站事件")
+        config = (
+            normalize_analysis_config(dict(request.config_snapshot))
+            if request.config_snapshot is not None else load_analysis_config(request.config_path)
+        )
+        project_root = request.config_path.resolve().parent.parent
+        catalog = load_defect_catalog(
+            project_root / "config" / "defect_code_catalog.csv", request.defect_catalog_path,
+        )
+        all_codes = normalize_defect_codes(request.station_events_frame, catalog)
+        if request.selection.scopes:
+            all_codes = all_codes[
+                all_codes["analysis_scope"].astype(str).isin(request.selection.scopes)
+            ].reset_index(drop=True)
+        selected_codes = filter_selected_code_events(all_codes, request.selection)
+        products = _excel_display_products(all_codes)
+        target_counts = {
+            code_target_key(source, code): len(
+                group[["analysis_scope", "dmc_raw"]].astype(str).drop_duplicates()
+            )
+            for (source, code), group in selected_codes[
+                selected_codes["code_status"].isin(["defect", "state_code_conflict"])
+            ].groupby(["source_type", "canonical_code"])
+        } if not selected_codes.empty else {}
+        selection_payload = {**request.selection.to_dict(), "target_product_counts": target_counts}
+        input_files = {
+            f"source_{index}": file_fingerprint(path.resolve())
+            for index, path in enumerate(request.source_files, 1) if path.resolve().is_file()
+        }
+        manifest = {
+            **runtime_metadata(), "task_name": request.task_name,
+            "input_files": input_files, "analysis_selection": selection_payload,
+            "input_summary": {
+                "product_count": len(products), "code_event_count": len(all_codes),
+                "parameter_count": max(0, len(request.process_parameters_frame.columns) - 1),
+            },
+        }
+        write_json(work_dir / "task_manifest.json", manifest)
+        write_json(work_dir / "analysis_selection.json", selection_payload)
+        with (work_dir / "analysis_config_snapshot.yaml").open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
+        callbacks.on_progress(ProgressEvent("VALIDATING", None, 0, len(products), 15, 0))
+        if token.is_cancelled:
+            raise InterruptedError("用户取消")
+
+        callbacks.on_stage("ANALYZING")
+        all_code_links = map_code_events_to_products(products, all_codes)
+        code_patterns = (
+            discover_selected_code_patterns(
+                all_codes, request.selection, config, image_links=all_code_links,
+            )
+            if request.selection.includes("code_patterns")
+            else discover_code_patterns(all_codes.iloc[0:0], config)
+        )
+        metric_parts: list[pd.DataFrame] = []
+        bin_parts: list[pd.DataFrame] = []
+        model_parts: list[pd.DataFrame] = []
+        joined_parts: list[pd.DataFrame] = []
+        relationship_summaries: list[dict[str, Any]] = []
+        if request.selection.includes("process_relationships"):
+            defect_events = selected_codes[
+                selected_codes["code_status"].isin(["defect", "state_code_conflict"])
+            ]
+            targets = defect_events[["analysis_scope", "source_type", "canonical_code"]].drop_duplicates()
+            for target_index, target in enumerate(targets.to_dict("records"), 1):
+                scope = str(target["analysis_scope"])
+                source = str(target["source_type"])
+                code = str(target["canonical_code"])
+                target_name = code_target_key(source, code)
+                target_products, target_defects = _target_relationship_population(
+                    all_codes, source, code, scope,
+                )
+                result = analyze_process_relationships(
+                    target_products, target_defects, request.process_parameters_frame,
+                    selected_parameters=request.selection.process_parameters,
+                )
+                metadata = {
+                    "analysis_scope": scope, "source_type": source,
+                    "canonical_code": code, "target": target_name,
+                }
+                for destination, frame in (
+                    (metric_parts, result.parameter_metrics),
+                    (bin_parts, result.binned_rates),
+                    (model_parts, result.model_importance),
+                    (joined_parts, result.joined),
+                ):
+                    enriched = frame.copy()
+                    for name, value in reversed(tuple(metadata.items())):
+                        if name in enriched:
+                            enriched[name] = value
+                        else:
+                            enriched.insert(0, name, value)
+                    destination.append(enriched)
+                relationship_summaries.append({**metadata, **result.summary})
+                callbacks.on_progress(ProgressEvent(
+                    "ANALYZING", None, target_index, len(targets),
+                    20 + round(target_index / max(1, len(targets)) * 65), len(defect_events),
+                ))
+        if token.is_cancelled:
+            raise InterruptedError("用户取消")
+
+        callbacks.on_stage("WRITING")
+        empty_extracted = pd.DataFrame(columns=EXTRACTED_COLUMNS)
+        empty_result = pd.DataFrame()
+        frames_to_write = {
+            "normalized_defect_codes.csv": selected_codes,
+            "code_patterns.csv": code_patterns,
+            "process_parameter_metrics.csv": pd.concat(metric_parts, ignore_index=True) if metric_parts else pd.DataFrame(),
+            "process_parameter_binned_rates.csv": pd.concat(bin_parts, ignore_index=True) if bin_parts else pd.DataFrame(),
+            "process_model_importance.csv": pd.concat(model_parts, ignore_index=True) if model_parts else pd.DataFrame(),
+            "process_joined.csv": pd.concat(joined_parts, ignore_index=True) if joined_parts else pd.DataFrame(),
+            "extracted_defects.csv": empty_extracted,
+            "spatial_clusters.csv": empty_result,
+            "discovered_patterns.csv": empty_result,
+            "alerts.csv": empty_result,
+            "spatial_trajectories.csv": empty_result,
+            "code_spatial_associations.csv": empty_result,
+            "code_label_conflicts.csv": empty_result,
+            "station_attribution.csv": empty_result,
+        }
+        products.to_csv(work_dir / "station_product_index.csv", index=False, encoding="utf-8-sig")
+        catalog.frame.to_csv(work_dir / "defect_code_catalog_snapshot.csv", index=False, encoding="utf-8-sig")
+        catalog.issues.to_csv(work_dir / "defect_code_catalog_issues.csv", index=False, encoding="utf-8-sig")
+        for filename, frame in frames_to_write.items():
+            frame.to_csv(work_dir / filename, index=False, encoding="utf-8-sig")
+        write_json(work_dir / "process_relationship_summary.json", relationship_summaries)
+        summary = {
+            "task_name": request.task_name, "status": "complete",
+            "analyzed_product_count": len(products), "extracted_defect_count": 0,
+            "products_with_extracted_defects": 0, "micro_defect_count": 0,
+            "local_defect_count": 0, "region_anomaly_count": 0,
+            "spatial_cluster_count": 0, "discovered_pattern_count": len(code_patterns),
+            "periodic_pattern_count": int(code_patterns.get("pattern_type", pd.Series(dtype=str)).eq("periodic").sum()),
+            "burst_pattern_count": int(code_patterns.get("pattern_type", pd.Series(dtype=str)).eq("burst").sum()),
+            "alert_count": 0, "normalized_code_event_count": len(selected_codes),
+            "code_pattern_count": len(code_patterns), "spatial_trajectory_count": 0,
+            "code_spatial_association_count": 0, "code_label_conflict_count": 0,
+            "elapsed_seconds": round(perf_counter() - started, 3),
+            "application_version": APP_VERSION, "algorithm_version": ALGORITHM_VERSION,
+            "analysis_mode": "excel_only", "enabled_scopes": list(request.selection.scopes),
+            "analysis_selection": selection_payload, "image_analysis_executed": False,
+            "relationship_targets": relationship_summaries,
+        }
+        write_json(work_dir / "analysis_summary.json", summary)
+        write_json(work_dir / "task_status.json", {"status": "complete", "message": ""})
+        callbacks.on_stage("COMPLETE")
+        callbacks.on_progress(ProgressEvent("COMPLETE", None, len(products), len(products), 100, 0))
+        work_dir.rename(final_dir)
+        empty = pd.DataFrame()
+        selected_code_links = filter_selected_code_events(all_code_links, request.selection)
+        return AnalysisResult("complete", final_dir, summary, {
+            "products": products, "extracted": empty_extracted,
+            "clusters": empty, "patterns": empty, "alerts": empty,
+            "normalized_codes": selected_codes, "code_patterns": code_patterns,
+            "trajectories": empty, "code_space": empty, "code_conflicts": empty,
+            "station_attribution": empty, "defect_catalog": catalog.frame,
+            "code_image_links": selected_code_links,
+            "process_metrics": frames_to_write["process_parameter_metrics.csv"],
+            "process_bins": frames_to_write["process_parameter_binned_rates.csv"],
+            "process_models": frames_to_write["process_model_importance.csv"],
+            "process_joined": frames_to_write["process_joined.csv"],
+        })
+    except InterruptedError:
+        write_json(work_dir / "task_status.json", {"status": "cancelled", "message": "用户取消"})
+        cancelled_dir = request.output_parent.resolve() / f"{base_name}_cancelled"
+        work_dir.rename(cancelled_dir)
+        return AnalysisResult("cancelled", cancelled_dir, {"status": "cancelled"})
+    except Exception as exc:
+        error_id = new_error_id()
+        write_json(work_dir / "task_status.json", {
+            "status": "failed", "message": str(exc), "error_id": error_id,
+        })
+        (work_dir / "traceback.txt").write_text(traceback.format_exc(), encoding="utf-8")
+        failed_dir = request.output_parent.resolve() / f"{base_name}_failed"
+        work_dir.rename(failed_dir)
+        raise RuntimeError(
+            f"纯Excel目标分析失败（错误编号 {error_id}），诊断文件位于：{failed_dir}"
+        ) from exc
+
+
 def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | None = None,
                       cancellation_token: CancellationToken | None = None) -> AnalysisResult:
     callbacks = callbacks or AnalysisCallbacks()
@@ -266,6 +616,7 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
                 "order_max": int(products.global_order.max()),
                 "cameras": sorted(products.camera.astype(str).unique().tolist()),
             },
+            "analysis_selection": request.selection.to_dict(),
         }
         if request.config_path.is_file():
             manifest["input_files"]["config"] = file_fingerprint(request.config_path.resolve())
@@ -277,6 +628,7 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
                 request.defect_catalog_path.resolve()
             )
         write_json(work_dir / "task_manifest.json", manifest)
+        write_json(work_dir / "analysis_selection.json", request.selection.to_dict())
         with (work_dir / "analysis_config_snapshot.yaml").open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
         source_index = request.source_index_frame if request.source_index_frame is not None else products
@@ -430,22 +782,51 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
             request.station_events_frame.copy()
             if request.station_events_frame is not None else products.copy()
         )
-        normalized_codes = normalize_defect_codes(station_events, catalog)
-        if not normalized_codes.empty and scopes:
-            normalized_codes = normalized_codes[
-                normalized_codes["analysis_scope"].astype(str).isin(scopes)
+        all_normalized_codes = normalize_defect_codes(station_events, catalog)
+        if not all_normalized_codes.empty and scopes:
+            all_normalized_codes = all_normalized_codes[
+                all_normalized_codes["analysis_scope"].astype(str).isin(scopes)
             ].reset_index(drop=True)
+        normalized_codes = filter_selected_code_events(all_normalized_codes, request.selection)
+        target_counts = {
+            code_target_key(source, code): len(
+                group[["analysis_scope", "dmc_raw"]].astype(str).drop_duplicates()
+            )
+            for (source, code), group in normalized_codes[
+                normalized_codes["code_status"].isin(["defect", "state_code_conflict"])
+            ].groupby(["source_type", "canonical_code"])
+        } if not normalized_codes.empty else {}
+        selection_payload = {
+            **request.selection.to_dict(), "target_product_counts": target_counts,
+        }
+        manifest["analysis_selection"] = selection_payload
+        write_json(work_dir / "task_manifest.json", manifest)
+        write_json(work_dir / "analysis_selection.json", selection_payload)
         code_image_links = map_code_events_to_products(products, normalized_codes)
-        code_patterns = discover_code_patterns(
-            normalized_codes, config, image_links=code_image_links
+        code_patterns = (
+            discover_selected_code_patterns(
+                all_normalized_codes, request.selection, config, image_links=code_image_links,
+            )
+            if request.selection.includes("code_patterns")
+            else discover_code_patterns(all_normalized_codes.iloc[0:0], config)
         )
         assigned, trajectories = discover_spatial_trajectories(products, assigned, config)
-        code_space, code_conflicts = analyze_code_spatial_associations(
-            products, normalized_codes, assigned
-        )
+        if request.selection.includes("code_image"):
+            code_space, code_conflicts = analyze_code_spatial_associations(
+                products, normalized_codes, assigned
+            )
+        else:
+            code_space, code_conflicts = analyze_code_spatial_associations(
+                products, normalized_codes.iloc[0:0], assigned,
+            )
         station_attribution = build_station_attribution(
             code_patterns, trajectories, code_space, products, assigned
         )
+        if not request.selection.includes("image_patterns"):
+            clusters = clusters.iloc[0:0].copy()
+            patterns = patterns.iloc[0:0].copy()
+            alerts = alerts.iloc[0:0].copy()
+            trajectories = trajectories.iloc[0:0].copy()
         if token.is_cancelled:
             raise InterruptedError("用户取消")
         callbacks.on_stage("WRITING")
@@ -502,6 +883,8 @@ def run_analysis_task(request: AnalysisRequest, callbacks: AnalysisCallbacks | N
             "truth_labels_used": False, "application_version": APP_VERSION,
             "algorithm_version": ALGORITHM_VERSION,
             "analysis_mode": request.analysis_mode,
+            "analysis_selection": selection_payload,
+            "image_analysis_executed": True,
             "enabled_scopes": scopes,
             "scope_summary": {
                 scope: {
