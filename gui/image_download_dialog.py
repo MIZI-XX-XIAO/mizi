@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.image_download import (
-    ALL_IMAGE_CODES, CODE_SCOPE, PRIMARY_IMAGE_CODES, ImageDownloadRequest,
+    ALL_IMAGE_CODES, AOI_DOWNLOAD_GROUPS, CODE_SCOPE, PRIMARY_IMAGE_CODES, ImageDownloadRequest,
     ImageDownloadResult, ProductIdSummary, default_image_download_dir,
     extract_product_ids,
 )
@@ -105,6 +105,7 @@ class ImageDownloadDialog(QDialog):
         source_grid.addWidget(output_button, 1, 3)
         self.product_stats = QLabel("尚未读取工作簿")
         self.product_stats.setObjectName("imageProductStats")
+        self.product_stats.setWordWrap(True)
         source_grid.addWidget(self.product_stats, 2, 1, 1, 3)
 
         option_group = QGroupBox("需要下载的图片代码")
@@ -213,10 +214,17 @@ class ImageDownloadDialog(QDialog):
         try:
             self.product_summary = extract_product_ids(Path(self.workbook_edit.text().strip()))
             summary = self.product_summary
-            self.product_stats.setText(
-                f"有效产品 {len(summary.valid_ids)} 个　·　重复记录 {summary.duplicate_count} 条　·　"
-                f"无效产品 {len(summary.invalid_ids)} 个"
-            )
+            group_lines = []
+            for group in AOI_DOWNLOAD_GROUPS:
+                family = group.family
+                group_lines.append(
+                    f"{group.scope}/{group.sheet_name}："
+                    f"有效 {len(summary.products_by_family.get(family, ()))}，"
+                    f"无效 {len(summary.invalid_ids_by_family.get(family, ()))}，"
+                    f"重复 {summary.duplicate_counts_by_family.get(family, 0)}；"
+                    f"来源 {summary.sources_by_family.get(family, '未找到')}"
+                )
+            self.product_stats.setText("\n".join(group_lines))
             self.product_stats.setObjectName("successBanner" if summary.valid_ids else "errorBanner")
             self.product_stats.style().unpolish(self.product_stats); self.product_stats.style().polish(self.product_stats)
         except Exception as exc:
@@ -269,6 +277,17 @@ class ImageDownloadDialog(QDialog):
             if not self.output_edit.text().strip(): raise ValueError("请选择图片保存位置")
             codes = self._selected_codes()
             quality = self._quality()
+            if not self.retry_manifest:
+                missing_groups = [
+                    group for group in AOI_DOWNLOAD_GROUPS
+                    if any(code.startswith(group.family) for code in codes)
+                    and not self.product_summary.products_by_family.get(group.family, ())
+                ]
+                if missing_groups:
+                    details = "、".join(
+                        f"{group.sheet_name}（{group.station_name}）" for group in missing_groups
+                    )
+                    raise ValueError(f"所选图片代码缺少对应AOI产品号：{details}")
             output = self.retry_manifest.parent if self.retry_manifest else default_image_download_dir(Path(self.output_edit.text().strip()))
             request = ImageDownloadRequest(
                 Path(self.workbook_edit.text().strip()), output, codes, quality,

@@ -2,11 +2,12 @@
 
 from pathlib import Path
 from threading import Event
+import json
 import zipfile
 
 import cv2
 import numpy as np
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 import pytest
 
 from src.image_download import (
@@ -129,6 +130,63 @@ def test_extract_product_ids_filters_and_keeps_production_order(tmp_path: Path) 
     assert result.duplicate_count == 1
 
 
+def test_eight_sheet_workbook_uses_only_four_dedicated_aoi_sheets(tmp_path: Path) -> None:
+    path = tmp_path / "eight_sheets.xlsx"
+    book = Workbook(); book.remove(book.active)
+    headers = ["Ident No.", "Test Date", "Line", "ST", "SI", "FU", "WP"]
+    non_aoi = _product(90)
+    for name, location in (
+        ("MS0310all", (3003, 10, 1, 1, 1)),
+        ("MS0320all", (3004, 20, 1, 1, 1)),
+        ("MS0335all", (3002, 35, 1, 1, 1)),
+    ):
+        sheet = book.create_sheet(name); sheet.append(headers)
+        sheet.append([non_aoi, "2026-08-26 07:00:00", *location])
+    expected: dict[str, tuple[str, ...]] = {}
+    for index, (family, sheet_name) in enumerate(
+        (("D", "MS03106"), ("E", "MS03206"), ("F", "MS03301"), ("G", "MS03302")), 1,
+    ):
+        first, second = _product(index * 10 + 1), _product(index * 10 + 2)
+        sheet = book.create_sheet(sheet_name.lower() if family == "D" else sheet_name)
+        sheet.append(["Ident No.", "Test Date"])
+        sheet.append([second, "2026-08-26 09:00:00"])
+        sheet.append([first, "2026-08-26 08:00:00"])
+        sheet.append([first, "2026-08-26 10:00:00"])
+        sheet.append([f"BAD-{family}", "2026-08-26 11:00:00"])
+        expected[family] = (first, second)
+    package = book.create_sheet("Package")
+    package.append(["Unique Part Ident No.", "Packaging Date"])
+    package.append([_product(99), "2026-08-26 12:00:00"])
+    book.save(path); book.close()
+
+    result = extract_product_ids(path)
+
+    assert result.products_by_family == expected
+    assert non_aoi not in result.valid_ids
+    assert _product(99) not in result.valid_ids
+    assert result.duplicate_counts_by_family == {family: 1 for family in "DEFG"}
+    assert result.invalid_ids_by_family == {
+        family: (f"BAD-{family}",) for family in "DEFG"
+    }
+    assert result.sources_by_family["D"] == "ms03106"
+
+
+def test_missing_dedicated_sheet_falls_back_to_exact_station_location(tmp_path: Path) -> None:
+    product = _product(1)
+    path = tmp_path / "fallback.xlsx"
+    book = Workbook(); sheet = book.active; sheet.title = "MS0310all"
+    sheet.append(["Ident No.", "Test Date", "Line", "ST", "SI", "FU", "WP"])
+    sheet.append([product, "2026-08-26 08:00:00", 3003, 10, 1, 1, 6])
+    sheet.append([_product(2), "2026-08-26 08:01:00", 3003, 10, 1, 1, 5])
+    book.save(path); book.close()
+
+    result = extract_product_ids(path)
+
+    assert result.products_by_family["D"] == (product,)
+    assert result.products_by_family["E"] == ()
+    assert result.sources_by_family["D"] == "工站匹配：MS0310all"
+
+
 def test_82_products_are_split_into_80_and_2(tmp_path: Path) -> None:
     products = tuple(_product(index) for index in range(82))
     backend = FakeBackend()
@@ -137,6 +195,45 @@ def test_82_products_are_split_into_80_and_2(tmp_path: Path) -> None:
     assert [len(call[0]) for call in backend.calls] == [80, 2]
     assert result.completed_item_count == 164
     assert backend.closed
+
+
+def test_multiple_aoi_families_are_downloaded_without_cross_product_requests(tmp_path: Path) -> None:
+    d_products = (_product(1), _product(2))
+    e_products = (_product(3),)
+    summary = ProductIdSummary(
+        d_products + e_products, (), 0,
+        products_by_family={"D": d_products, "E": e_products, "F": (), "G": ()},
+        sources_by_family={"D": "MS03106", "E": "MS03206"},
+    )
+    backend = FakeBackend()
+    result = ImageDownloadOrchestrator(
+        _request(tmp_path, codes=("DE", "EE"), batch_size=10), backend,
+    ).run(summary)
+
+    assert backend.calls == [(d_products, ("DE",)), (e_products, ("EE",))]
+    assert result.completed_item_count == 3
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["version"] == 2
+    assert manifest["product_ids_by_family"] == {"D": list(d_products), "E": list(e_products)}
+    report = load_workbook(result.summary_path, read_only=True)
+    assert "AOI Stations" in report.sheetnames
+    report.close()
+
+
+def test_selected_family_without_aoi_products_is_rejected_before_backend_call(tmp_path: Path) -> None:
+    d_product = _product(1)
+    summary = ProductIdSummary(
+        (d_product,), (), 0,
+        products_by_family={"D": (d_product,), "E": (), "F": (), "G": ()},
+    )
+    backend = FakeBackend()
+
+    with pytest.raises(ValueError, match="MS03206"):
+        ImageDownloadOrchestrator(
+            _request(tmp_path, codes=("DE", "EE"), batch_size=10), backend,
+        ).run(summary)
+
+    assert backend.calls == []
 
 
 def test_bad_product_and_code_are_isolated_while_good_images_survive(tmp_path: Path) -> None:
@@ -203,6 +300,36 @@ def test_retry_manifest_only_downloads_failed_item(tmp_path: Path) -> None:
     assert backend.calls == [((bad,), ("DE",))]
     assert retried.product_count == 4
     assert retried.completed_item_count == 8
+
+
+def test_v1_retry_manifest_retries_exact_sparse_pairs(tmp_path: Path) -> None:
+    products = (_product(1), _product(2))
+    request = _request(tmp_path, codes=("DA", "DE"), batch_size=10)
+    manifest_path = tmp_path / "v1_manifest.json"
+    manifest_path.write_text(json.dumps({
+        "version": 1,
+        "workbook": str(request.workbook_path),
+        "image_codes": ["DA", "DE"],
+        "product_ids": list(products),
+        "completed_items": [[products[0], "DE"], [products[1], "DA"]],
+        "failed_items": [
+            {"product_id": products[0], "image_code": "DA", "category": "missing_image"},
+            {"product_id": products[1], "image_code": "DE", "category": "missing_image"},
+        ],
+    }), encoding="utf-8")
+    retry_request = ImageDownloadRequest(
+        request.workbook_path, request.output_root, request.image_codes, request.quality,
+        batch_size=10, retry_manifest=manifest_path,
+    )
+    backend = FakeBackend()
+
+    result = ImageDownloadOrchestrator(retry_request, backend).run(
+        ProductIdSummary(products, (), 0),
+    )
+
+    assert backend.calls == [((products[0],), ("DA",)), ((products[1],), ("DE",))]
+    assert result.status == "complete"
+    assert result.completed_item_count == 4
 
 
 def test_product_limit_and_credentials_are_not_persisted(tmp_path: Path) -> None:

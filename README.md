@@ -170,6 +170,8 @@ uv run --frozen --group build python scripts/build_portable.py --clean
 - 下载完成后校验ZIP和TIFF，将D/E/F/G系列分别放入5S/5X/7S/7X目录，并自动回填新建任务。
 - 异常项写入 `image_download_issues.csv` 和 `image_download_summary.xlsx`；可通过“仅重试异常项…”继续失败内容。
 - LDAP密码仅在本次后台任务内存中使用，不保存到配置、日志或任务清单。
+- 产品号只取自 `MS03106`、`MS03206`、`MS03301`、`MS03302` 四个AOI工站；专用页签缺失时按工站位置兜底。
+- 多工站任务按D/E/F/G图片族独立分批，不会把一个AOI工站的产品号交叉请求到其他工站。
 
 图片网站依赖公司网络、企业证书及登录权限。便携版应携带与公司Edge主版本一致的 `image_downloader/msedgedriver.exe`；未携带时程序会尝试通过Selenium Manager解析驱动。
 程序使用 `%LOCALAPPDATA%/MEA5SDefectAnalysis/edge-image-profile/` 中的软件专用普通Edge配置，

@@ -10,12 +10,14 @@ from typing import Callable, Protocol, Sequence
 import csv
 import hashlib
 import json
+import re
 import shutil
 import zipfile
 
 import cv2
 import numpy as np
-from openpyxl import Workbook
+import pandas as pd
+from openpyxl import Workbook, load_workbook
 
 from src.station_sources import parse_image_filename
 
@@ -36,10 +38,32 @@ LogCallback = Callable[[str], None]
 
 
 @dataclass(frozen=True)
+class AoiDownloadGroup:
+    family: str
+    scope: str
+    sheet_name: str
+    station_id: str
+    station_name: str
+
+
+AOI_DOWNLOAD_GROUPS = (
+    AoiDownloadGroup("D", "5S", "MS03106", "35_5s_aoi", "5S AOI"),
+    AoiDownloadGroup("E", "5X", "MS03206", "57_5x_aoi", "5X AOI"),
+    AoiDownloadGroup("F", "7S", "MS03301", "conveyor_7s_aoi", "7S AOI"),
+    AoiDownloadGroup("G", "7X", "MS03302", "conveyor_7x_aoi", "7X AOI"),
+)
+AOI_GROUP_BY_FAMILY = {group.family: group for group in AOI_DOWNLOAD_GROUPS}
+
+
+@dataclass(frozen=True)
 class ProductIdSummary:
     valid_ids: tuple[str, ...]
     invalid_ids: tuple[str, ...]
     duplicate_count: int
+    products_by_family: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    invalid_ids_by_family: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    duplicate_counts_by_family: dict[str, int] = field(default_factory=dict)
+    sources_by_family: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -108,33 +132,159 @@ class ImageSiteBackend(Protocol):
         """关闭浏览器和驱动。"""
 
 
-def extract_product_ids(workbook_path: Path) -> ProductIdSummary:
-    """从MES工作簿的工站事件中按生产时间提取25位Ident No.。"""
-    from src.station_sources import load_station_catalog
-    from src.station_workbook import load_station_workbook
+def _normalized_header(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
-    project_root = Path(__file__).resolve().parents[1]
-    catalog = load_station_catalog(project_root / "config" / "stations.yaml")
-    workbook = load_station_workbook(workbook_path, catalog)
-    events = workbook.events.copy()
-    if "test_date" in events:
-        events = events.sort_values("test_date", na_position="last", kind="stable")
-    raw_values = [str(value or "").strip().upper() for value in events["dmc_raw"]]
+
+def _timestamp(value: object) -> pd.Timestamp:
+    text = str(value or "").strip()
+    if not text:
+        return pd.NaT
+    year_first = bool(re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", text))
+    return pd.to_datetime(text, errors="coerce", yearfirst=year_first, dayfirst=not year_first)
+
+
+def _read_aoi_sheet_records(workbook, expected_name: str) -> tuple[list[tuple[str, pd.Timestamp, int]], str]:
+    """按名称读取专用AOI页签中的Ident No.记录，名称匹配不区分大小写。"""
+    actual_name = next(
+        (name for name in workbook.sheetnames if name.strip().casefold() == expected_name.casefold()),
+        "",
+    )
+    if not actual_name:
+        return [], ""
+    rows = list(workbook[actual_name].iter_rows(values_only=True))
+    starts = [
+        index for index, row in enumerate(rows)
+        if row and any(_normalized_header(value) == "identno" for value in row)
+    ]
+    records: list[tuple[str, pd.Timestamp, int]] = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(rows)
+        normalized = [_normalized_header(value) for value in rows[start]]
+        ident_index = normalized.index("identno")
+        date_index = normalized.index("testdate") if "testdate" in normalized else -1
+        for row_index in range(start + 1, end):
+            row = rows[row_index]
+            if ident_index >= len(row):
+                continue
+            product_id = str(row[ident_index] or "").strip().upper()
+            if not product_id:
+                continue
+            date_value = row[date_index] if 0 <= date_index < len(row) else None
+            records.append((product_id, _timestamp(date_value), row_index + 1))
+    return records, actual_name
+
+
+def _summarize_records(
+    records: Sequence[tuple[str, pd.Timestamp, int]],
+) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+    ordered = sorted(
+        records,
+        key=lambda item: (
+            pd.isna(item[1]), item[1] if pd.notna(item[1]) else pd.Timestamp.max, item[2],
+        ),
+    )
     valid: list[str] = []
     invalid: list[str] = []
     seen: set[str] = set()
-    duplicates = 0
-    for value in raw_values:
-        if len(value) != 25:
-            if value and value not in invalid:
-                invalid.append(value)
+    duplicate_count = 0
+    for product_id, _test_date, _row_number in ordered:
+        if len(product_id) != 25:
+            if product_id not in invalid:
+                invalid.append(product_id)
             continue
-        if value in seen:
-            duplicates += 1
+        if product_id in seen:
+            duplicate_count += 1
             continue
-        seen.add(value)
-        valid.append(value)
-    return ProductIdSummary(tuple(valid), tuple(invalid), duplicates)
+        seen.add(product_id)
+        valid.append(product_id)
+    return tuple(valid), tuple(invalid), duplicate_count
+
+
+def extract_product_ids(workbook_path: Path) -> ProductIdSummary:
+    """按四个AOI工站提取产品号，优先使用专用页签并按工站位置兜底。"""
+    from src.station_sources import load_station_catalog
+    from src.station_workbook import load_station_workbook
+
+    resolved = workbook_path.resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Excel工作簿不存在：{resolved}")
+    exact_records: dict[str, list[tuple[str, pd.Timestamp, int]]] = {}
+    exact_sources: dict[str, str] = {}
+    book = load_workbook(
+        resolved, read_only=True, data_only=True,
+        keep_vba=resolved.suffix.lower() == ".xlsm",
+    )
+    try:
+        for group in AOI_DOWNLOAD_GROUPS:
+            records, source = _read_aoi_sheet_records(book, group.sheet_name)
+            exact_records[group.family] = records
+            exact_sources[group.family] = source
+    finally:
+        book.close()
+
+    missing_families = {
+        group.family for group in AOI_DOWNLOAD_GROUPS if not exact_records[group.family]
+    }
+    fallback_events = None
+    if missing_families:
+        project_root = Path(__file__).resolve().parents[1]
+        catalog = load_station_catalog(project_root / "config" / "stations.yaml")
+        try:
+            fallback_events = load_station_workbook(resolved, catalog).events.copy()
+        except ValueError as exc:
+            if "没有可识别的工站记录" not in str(exc):
+                raise
+            fallback_events = pd.DataFrame(columns=[
+                "station_id", "dmc_raw", "test_date", "source_row", "source_sheet",
+            ])
+
+    products_by_family: dict[str, tuple[str, ...]] = {}
+    invalid_by_family: dict[str, tuple[str, ...]] = {}
+    duplicates_by_family: dict[str, int] = {}
+    sources_by_family: dict[str, str] = {}
+    for group in AOI_DOWNLOAD_GROUPS:
+        records = exact_records[group.family]
+        source = exact_sources[group.family]
+        if not records and fallback_events is not None:
+            station_events = fallback_events[
+                fallback_events["station_id"].astype(str).eq(group.station_id)
+            ]
+            records = [
+                (str(row.dmc_raw or "").strip().upper(), row.test_date, int(row.source_row))
+                for row in station_events.itertuples()
+                if str(row.dmc_raw or "").strip()
+            ]
+            fallback_sources = tuple(dict.fromkeys(
+                str(value) for value in station_events.get("source_sheet", pd.Series(dtype=str))
+                if str(value).strip()
+            ))
+            source = "工站匹配：" + "、".join(fallback_sources) if fallback_sources else "未找到"
+        valid, invalid, duplicates = _summarize_records(records)
+        products_by_family[group.family] = valid
+        invalid_by_family[group.family] = invalid
+        duplicates_by_family[group.family] = duplicates
+        sources_by_family[group.family] = source or "未找到"
+
+    valid_ids = tuple(dict.fromkeys(
+        product_id
+        for group in AOI_DOWNLOAD_GROUPS
+        for product_id in products_by_family[group.family]
+    ))
+    invalid_ids = tuple(dict.fromkeys(
+        product_id
+        for group in AOI_DOWNLOAD_GROUPS
+        for product_id in invalid_by_family[group.family]
+    ))
+    return ProductIdSummary(
+        valid_ids,
+        invalid_ids,
+        sum(duplicates_by_family.values()),
+        products_by_family,
+        invalid_by_family,
+        duplicates_by_family,
+        sources_by_family,
+    )
 
 
 def create_product_template(path: Path, product_ids: Sequence[str]) -> Path:
@@ -273,6 +423,9 @@ class ImageDownloadOrchestrator:
         self.temp_dir = self.output_dir / "_temporary_batches"
         self.manifest_path = self.output_dir / "image_download_manifest.json"
         self._all_product_ids: list[str] = []
+        self._products_by_family: dict[str, tuple[str, ...]] = {}
+        self._sources_by_family: dict[str, str] = {}
+        self._planned_items: set[tuple[str, str]] = set()
 
     def _check_cancelled(self) -> None:
         if self.stop_event.is_set():
@@ -283,16 +436,22 @@ class ImageDownloadOrchestrator:
         if shutil.disk_usage(self.output_dir).free < MIN_FREE_BYTES:
             raise OSError("图片保存目录剩余空间不足2 GB")
 
-    def _record_manifest(self, product_ids: Sequence[str]) -> None:
+    def _record_manifest(self) -> None:
         payload = {
-            "version": 1,
+            "version": 2,
             "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "workbook": str(self.request.workbook_path.resolve()),
             "quality": self.request.quality,
             "skip_rework": self.request.skip_rework,
             "image_codes": list(self.request.image_codes),
             "batch_size": self.request.batch_size,
-            "product_ids": list(product_ids),
+            "product_ids": list(self._all_product_ids),
+            "product_ids_by_family": {
+                family: list(product_ids)
+                for family, product_ids in self._products_by_family.items()
+            },
+            "sources_by_family": self._sources_by_family,
+            "planned_items": [list(item) for item in sorted(self._planned_items)],
             "completed_items": [list(item) for item in sorted(self.completed_items)],
             "failed_items": [
                 {"product_id": issue.product_id, "image_code": issue.image_code,
@@ -306,7 +465,7 @@ class ImageDownloadOrchestrator:
 
     def _checkpoint(self) -> None:
         if self._all_product_ids:
-            self._record_manifest(self._all_product_ids)
+            self._record_manifest()
 
     def _attempt_download(
         self, product_ids: Sequence[str], image_codes: Sequence[str], retry_count: int,
@@ -427,7 +586,7 @@ class ImageDownloadOrchestrator:
                 ))
         self._checkpoint()
 
-    def _write_reports(self, product_ids: Sequence[str]) -> Path:
+    def _write_reports(self) -> Path:
         issue_path = self.output_dir / "image_download_issues.csv"
         columns = ["product_id", "image_code", "stage", "category", "message", "retry_count", "status"]
         with issue_path.open("w", newline="", encoding="utf-8-sig") as handle:
@@ -440,9 +599,22 @@ class ImageDownloadOrchestrator:
         summary = workbook.active
         summary.title = "Summary"
         summary.append(["项目", "数量"])
-        summary.append(["产品号", len(product_ids)])
+        summary.append(["唯一产品号", len(self._all_product_ids)])
+        summary.append(["计划产品-代码项", len(self._planned_items)])
         summary.append(["已下载产品-代码项", len(self.completed_items)])
         summary.append(["异常项", len([i for i in self.issues if i.status == "failed"])])
+        stations = workbook.create_sheet("AOI Stations")
+        stations.append(["图片范围", "AOI页签", "数据来源", "产品数", "计划项", "完成项"])
+        for group in AOI_DOWNLOAD_GROUPS:
+            family = group.family
+            stations.append([
+                group.scope,
+                group.sheet_name,
+                self._sources_by_family.get(family, ""),
+                len(self._products_by_family.get(family, ())),
+                len([item for item in self._planned_items if item[1].startswith(family)]),
+                len([item for item in self.completed_items if item[1].startswith(family)]),
+            ])
         detail = workbook.create_sheet("Issues")
         detail.append(columns)
         for issue in self.issues:
@@ -451,48 +623,147 @@ class ImageDownloadOrchestrator:
         workbook.close()
         return summary_path
 
+    def _summary_products_by_family(self, summary: ProductIdSummary) -> dict[str, tuple[str, ...]]:
+        if summary.products_by_family:
+            return {
+                family: tuple(summary.products_by_family.get(family, ()))
+                for family in CODE_SCOPE
+            }
+        selected_families = {code[0] for code in self.request.image_codes}
+        if len(selected_families) == 1:
+            family = next(iter(selected_families))
+            return {key: tuple(summary.valid_ids) if key == family else () for key in CODE_SCOPE}
+        return {family: () for family in CODE_SCOPE}
+
+    def _normal_jobs(
+        self, summary: ProductIdSummary,
+    ) -> list[tuple[str, list[str], tuple[str, ...]]]:
+        products_by_family = self._summary_products_by_family(summary)
+        codes_by_family = {
+            family: tuple(code for code in self.request.image_codes if code.startswith(family))
+            for family in CODE_SCOPE
+        }
+        missing = [
+            AOI_GROUP_BY_FAMILY[family]
+            for family, codes in codes_by_family.items()
+            if codes and not products_by_family[family]
+        ]
+        if missing:
+            details = "、".join(f"{group.sheet_name}（{group.station_name}）" for group in missing)
+            raise ValueError(f"所选图片代码缺少对应AOI产品号：{details}")
+
+        self._products_by_family = {
+            family: products_by_family[family]
+            for family, codes in codes_by_family.items() if codes
+        }
+        self._sources_by_family = {
+            family: summary.sources_by_family.get(family, "兼容输入")
+            for family in self._products_by_family
+        }
+        self._all_product_ids = list(dict.fromkeys(
+            product_id
+            for family in CODE_SCOPE
+            for product_id in self._products_by_family.get(family, ())
+        ))
+        self._planned_items = {
+            (product_id, code)
+            for family, product_ids in self._products_by_family.items()
+            for product_id in product_ids
+            for code in codes_by_family[family]
+        }
+        jobs: list[tuple[str, list[str], tuple[str, ...]]] = []
+        for family in CODE_SCOPE:
+            product_ids = self._products_by_family.get(family, ())
+            codes = codes_by_family[family]
+            for index in range(0, len(product_ids), self.request.batch_size):
+                jobs.append((family, list(product_ids[index:index + self.request.batch_size]), codes))
+        return jobs
+
+    def _retry_jobs(self, summary: ProductIdSummary) -> list[tuple[str, list[str], tuple[str, ...]]]:
+        payload = json.loads(self.request.retry_manifest.read_text(encoding="utf-8"))
+        selected_codes = set(self.request.image_codes)
+        failed_pairs = {
+            (str(item.get("product_id", "")).strip().upper(), str(item.get("image_code", "")).strip().upper())
+            for item in payload.get("failed_items", [])
+            if str(item.get("product_id", "")).strip() and str(item.get("image_code", "")).strip().upper() in selected_codes
+        }
+        if not failed_pairs:
+            raise ValueError("异常任务清单中没有可重试的产品号—图片代码项")
+        self.completed_items.update(
+            (str(item[0]).upper(), str(item[1]).upper())
+            for item in payload.get("completed_items", []) if len(item) == 2
+        )
+        stored_planned = {
+            (str(item[0]).upper(), str(item[1]).upper())
+            for item in payload.get("planned_items", []) if len(item) == 2
+        }
+        self._planned_items = stored_planned or (self.completed_items | failed_pairs)
+        stored_groups = payload.get("product_ids_by_family", {})
+        if stored_groups:
+            self._products_by_family = {
+                family: tuple(str(item).upper() for item in stored_groups.get(family, []))
+                for family in CODE_SCOPE if stored_groups.get(family)
+            }
+        else:
+            current = self._summary_products_by_family(summary)
+            self._products_by_family = {
+                family: tuple(dict.fromkeys(
+                    list(current.get(family, ()))
+                    + [product_id for product_id, code in failed_pairs if code.startswith(family)]
+                ))
+                for family in CODE_SCOPE
+                if current.get(family) or any(code.startswith(family) for _, code in failed_pairs)
+            }
+        self._sources_by_family = {
+            **summary.sources_by_family,
+            **{str(key): str(value) for key, value in payload.get("sources_by_family", {}).items()},
+        }
+        stored_products = [str(item).upper() for item in payload.get("product_ids", [])]
+        self._all_product_ids = list(dict.fromkeys(
+            stored_products or [item for products in self._products_by_family.values() for item in products]
+        ))
+        # 精确按失败项重试，避免把稀疏失败组合重新扩展为笛卡尔积。
+        return [(code[0], [product_id], (code,)) for product_id, code in sorted(failed_pairs)]
+
     def run(self, product_summary: ProductIdSummary | None = None) -> ImageDownloadResult:
         self.request.validate()
         summary = product_summary or extract_product_ids(self.request.workbook_path)
-        all_product_ids = list(summary.valid_ids)
-        self._all_product_ids = list(all_product_ids)
-        product_ids = list(all_product_ids)
-        if self.request.retry_manifest:
-            payload = json.loads(self.request.retry_manifest.read_text(encoding="utf-8"))
-            failed = payload.get("failed_items", [])
-            retry_ids = {str(item.get("product_id", "")) for item in failed}
-            product_ids = [item for item in product_ids if item in retry_ids]
-            self.completed_items.update(tuple(item) for item in payload.get("completed_items", []))
-        if not product_ids:
-            raise ValueError("MES工作簿中没有可下载的25位Ident No.")
+        jobs = self._retry_jobs(summary) if self.request.retry_manifest else self._normal_jobs(summary)
+        if not jobs:
+            raise ValueError("MES工作簿中没有可下载的AOI产品号")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         for scope in CODE_SCOPE.values():
             (self.output_dir / "images" / scope).mkdir(parents=True, exist_ok=True)
         self._checkpoint()
-        self.log(
-            f"有效产品号 {len(product_ids)} 个，无效 {len(summary.invalid_ids)} 个，"
-            f"重复记录 {summary.duplicate_count} 条"
-        )
-        total_batches = (len(product_ids) + self.request.batch_size - 1) // self.request.batch_size
+        for family, product_ids in self._products_by_family.items():
+            group = AOI_GROUP_BY_FAMILY[family]
+            self.log(
+                f"{group.sheet_name}/{group.station_name}：有效产品 {len(product_ids)} 个，"
+                f"来源 {self._sources_by_family.get(family, '未知')}"
+            )
         try:
-            for index in range(0, len(product_ids), self.request.batch_size):
+            total_batches = len(jobs)
+            for batch_number, (_family, product_ids, image_codes) in enumerate(jobs, 1):
                 self._check_cancelled()
-                batch_number = index // self.request.batch_size + 1
                 self.progress(
                     int((batch_number - 1) / max(1, total_batches) * 90),
                     f"正在处理第 {batch_number}/{total_batches} 批",
                 )
-                batch = product_ids[index:index + self.request.batch_size]
-                self._download_or_isolate(batch, self.request.image_codes)
-                self._record_manifest(all_product_ids)
+                self._download_or_isolate(product_ids, image_codes)
+                self._record_manifest()
             self.progress(94, "正在生成下载报告")
-            for invalid in summary.invalid_ids:
-                self.issues.append(ImageDownloadIssue(
-                    invalid, "", "input", "invalid_product_id", "产品号不是25位", status="failed",
-                ))
-            self._record_manifest(all_product_ids)
-            summary_path = self._write_reports(all_product_ids)
+            selected_families = {code[0] for code in self.request.image_codes}
+            if not self.request.retry_manifest:
+                for family in selected_families:
+                    for invalid in summary.invalid_ids_by_family.get(family, ()):
+                        self.issues.append(ImageDownloadIssue(
+                            invalid, "", "input", "invalid_product_id",
+                            f"{AOI_GROUP_BY_FAMILY[family].sheet_name}中的产品号不是25位",
+                            status="failed",
+                        ))
+            self._record_manifest()
+            summary_path = self._write_reports()
             failed_count = len([issue for issue in self.issues if issue.status == "failed"])
             status = "partial" if failed_count else "complete"
             self.progress(100, "图片下载完成" if status == "complete" else "图片下载部分完成")
@@ -502,7 +773,7 @@ class ImageDownloadOrchestrator:
                 if any((self.output_dir / "images" / scope).iterdir())
             }
             return ImageDownloadResult(
-                status, self.output_dir, roots, len(all_product_ids), len(self.completed_items),
+                status, self.output_dir, roots, len(self._all_product_ids), len(self.completed_items),
                 self.issues, self.manifest_path, summary_path,
             )
         finally:

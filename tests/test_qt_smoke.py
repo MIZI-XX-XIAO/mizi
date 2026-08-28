@@ -147,6 +147,13 @@ def test_image_download_dialog_reads_mes_products_and_uses_safe_defaults(qtbot, 
     assert "普通Edge" in dialog.login_hint.text()
     assert "Windows Security" in dialog.login_hint.text()
     assert dialog.login_hint.isVisible()
+    assert "5S/MS03106" in dialog.product_stats.text()
+    assert "工站匹配：MS0310all" in dialog.product_stats.text()
+    dialog.code_checks["EE"].setChecked(True)
+    dialog.origin_radio.setChecked(True)
+    dialog._start()
+    assert dialog.worker is None
+    assert "MS03206" in dialog.notice.text()
     dialog.close(); window.close(); window.deleteLater()
 
 
