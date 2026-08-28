@@ -1,0 +1,30 @@
+# 本文件声明uv管理的Python版本范围、运行依赖及开发和构建依赖组。
+[project]
+name = "mea-5s-simulation"
+version = "0.1.0"
+description = "Windows GUI application for MEA 5S defect analysis"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "matplotlib==3.9.2",
+    "numpy==1.26.4",
+    "opencv-python==4.10.0.84",
+    "openpyxl==3.1.5",
+    "pandas==2.2.2",
+    "psutil==6.0.0",
+    "pyside6==6.11.1",
+    "pyyaml==6.0.2",
+    "selenium==4.35.0",
+]
+
+[dependency-groups]
+dev = [
+    "pip==26.2.1",
+    "pytest==8.3.5",
+    "pytest-qt==4.5.0",
+]
+build = [
+    "pyinstaller>=6.10,<7",
+]
+
+[tool.uv]
+package = false

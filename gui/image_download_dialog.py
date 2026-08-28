@@ -151,6 +151,14 @@ class ImageDownloadDialog(QDialog):
         settings_grid.addWidget(QLabel("LDAP账号"), 1, 0); settings_grid.addWidget(self.username_edit, 1, 1, 1, 2)
         settings_grid.addWidget(QLabel("LDAP密码"), 1, 3); settings_grid.addWidget(self.password_edit, 1, 4)
 
+        self.login_hint = QLabel(
+            "首次使用需在普通Edge中完成公司登录；认证成功后，软件专用配置会复用登录状态。"
+            "Windows Security系统窗口需要手动输入。"
+        )
+        self.login_hint.setWordWrap(True)
+        self.login_hint.setObjectName("imageLoginHint")
+        settings_grid.addWidget(self.login_hint, 2, 0, 1, 5)
+
         self.notice = QLabel(); self.notice.setWordWrap(True); self.notice.setVisible(False)
         self.notice.setTextInteractionFlags(Qt.TextSelectableByMouse)
         run_card = QFrame(); run_card.setObjectName("imageRunCard")
@@ -273,7 +281,7 @@ class ImageDownloadDialog(QDialog):
         self.notice.setVisible(False); self.password_edit.clear(); self.log.clear(); self.progress.setValue(0)
         for widget in self._input_widgets: widget.setEnabled(False)
         self.start_button.setEnabled(False); self.cancel_button.setText("安全取消")
-        self.status.setText("正在启动Edge")
+        self.status.setText("正在启动普通Edge；首次使用请完成公司登录")
         self.thread = QThread(self)
         self.worker = ImageDownloadWorker(self.project_root, request, self.product_summary)
         self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run)
@@ -327,4 +335,3 @@ class ImageDownloadDialog(QDialog):
         if self.worker is not None:
             self._show_notice("下载仍在运行，请先安全取消。", "warning"); event.ignore(); return
         super().closeEvent(event)
-

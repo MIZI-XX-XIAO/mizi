@@ -5,13 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Event
 from typing import Callable, Sequence
-import os
 import shutil
 import sys
 import time
 
+from src.app_runtime import user_data_dir
+
 
 SITE_URL = "https://fuel-cell.apac.bosch.com/customize/download"
+EDGE_PROFILE_DIRNAME = "edge-image-profile"
 
 
 class EdgeImageSiteBackend:
@@ -25,6 +27,7 @@ class EdgeImageSiteBackend:
         log: Callable[[str], None] | None = None,
         login_wait_seconds: int = 300,
         download_wait_seconds: int = 3600,
+        profile_dir: Path | None = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.username = username
@@ -32,9 +35,11 @@ class EdgeImageSiteBackend:
         self.log = log or (lambda _message: None)
         self.login_wait_seconds = login_wait_seconds
         self.download_wait_seconds = download_wait_seconds
+        self.profile_dir = (profile_dir or user_data_dir() / EDGE_PROFILE_DIRNAME).resolve()
         self.driver = None
         self._By = None
         self._WebDriverWait = None
+        self._TimeoutException = None
 
     def _load_selenium(self):
         try:
@@ -42,12 +47,30 @@ class EdgeImageSiteBackend:
             from selenium.webdriver.common.by import By
             from selenium.webdriver.edge.options import Options
             from selenium.webdriver.edge.service import Service
+            from selenium.common.exceptions import TimeoutException
             from selenium.webdriver.support.ui import WebDriverWait
         except ModuleNotFoundError as exc:
             raise RuntimeError("图片下载组件缺少 Selenium，请安装软件完整依赖包") from exc
         self._By = By
         self._WebDriverWait = WebDriverWait
+        self._TimeoutException = TimeoutException
         return webdriver, Options, Service
+
+    def _build_options(self, options_class, initial_download_dir: Path):
+        """创建使用应用专用持久配置的普通Edge选项。"""
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        options = options_class()
+        options.add_argument(f"--user-data-dir={self.profile_dir}")
+        options.add_argument("--profile-directory=Default")
+        options.add_argument("--disable-notifications")
+        options.add_argument("--disable-popup-blocking")
+        options.add_experimental_option("prefs", {
+            "download.default_directory": str(initial_download_dir.resolve()),
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True,
+        })
+        return options
 
     def _driver_candidates(self) -> tuple[Path, ...]:
         frozen_root = Path(getattr(sys, "_MEIPASS", self.project_root))
@@ -62,16 +85,7 @@ class EdgeImageSiteBackend:
             return
         webdriver, Options, Service = self._load_selenium()
         initial_download_dir.mkdir(parents=True, exist_ok=True)
-        options = Options()
-        options.add_argument("--inprivate")
-        options.add_argument("--disable-notifications")
-        options.add_argument("--disable-popup-blocking")
-        options.add_experimental_option("prefs", {
-            "download.default_directory": str(initial_download_dir.resolve()),
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "safebrowsing.enabled": True,
-        })
+        options = self._build_options(Options, initial_download_dir)
         driver_path = next((path for path in self._driver_candidates() if path.is_file()), None)
         if driver_path is None:
             on_path = shutil.which("msedgedriver")
@@ -86,7 +100,13 @@ class EdgeImageSiteBackend:
             )
             raise RuntimeError(f"无法启动Microsoft Edge：{exc}\n{hint}") from exc
         self.driver.set_page_load_timeout(120)
-        self.driver.get(SITE_URL)
+        self.log(f"使用软件专用Edge登录配置：{self.profile_dir}")
+        try:
+            self.driver.get(SITE_URL)
+        except self._TimeoutException:
+            # ADFS/WIA的系统级凭据框可能让导航一直处于未完成状态；
+            # 浏览器仍可由用户操作，因此转入统一的登录等待流程。
+            self.log("图片网站导航仍在等待认证，请在Edge中完成公司登录")
         self._complete_login()
 
     def _find_first(self, selectors: Sequence[tuple[str, str]]):
@@ -108,14 +128,38 @@ class EdgeImageSiteBackend:
         except Exception:
             return False
 
+    def _current_url(self) -> str:
+        try:
+            return str(self.driver.current_url or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _is_wia_url(url: str) -> bool:
+        normalized = url.lower()
+        return "/adfs/ls/wia" in normalized or (
+            "stfs.bosch.com" in normalized and "/adfs/" in normalized
+        )
+
     def _complete_login(self) -> None:
         deadline = time.monotonic() + self.login_wait_seconds
         credentials_used = False
-        self.log("等待图片网站登录；如出现Microsoft窗口，请在Edge中完成登录")
+        last_stage = ""
+        self.log("等待图片网站登录；首次使用时请在Edge中完成公司认证")
         while time.monotonic() < deadline:
             if self._page_ready():
                 self.log("图片网站登录成功")
                 return
+            current_url = self._current_url()
+            if self._is_wia_url(current_url):
+                if last_stage != "wia":
+                    self.log(
+                        "检测到ADFS/Windows集成认证。Windows Security是系统窗口，"
+                        "请在Edge中手动完成；程序将在认证成功后自动继续"
+                    )
+                    last_stage = "wia"
+                time.sleep(1)
+                continue
             if not credentials_used:
                 username = self._find_first((
                     (self._By.ID, "login_username"), (self._By.NAME, "login_username"),
@@ -126,6 +170,9 @@ class EdgeImageSiteBackend:
                     (self._By.CSS_SELECTOR, "input[type='password']"),
                 ))
                 if username is not None and password is not None:
+                    if last_stage != "ldap":
+                        self.log("检测到网页LDAP登录表单")
+                        last_stage = "ldap"
                     if not self.username or not self.password:
                         raise RuntimeError("网站显示LDAP登录，但本次任务未提供LDAP账号密码")
                     username.clear(); username.send_keys(self.username)
@@ -139,9 +186,17 @@ class EdgeImageSiteBackend:
                     login_button.click()
                     credentials_used = True
                     self.log("已提交LDAP登录，等待页面授权")
+                elif last_stage != "redirect":
+                    self.log("等待公司认证页面跳转或用户完成登录")
+                    last_stage = "redirect"
             time.sleep(1)
         self.password = ""
-        raise TimeoutError("等待图片网站登录超时，请确认公司网络、权限和登录状态")
+        if last_stage == "wia":
+            raise TimeoutError(
+                "等待ADFS/Windows集成认证超时。请确认公司网络和账号权限；"
+                "若Windows Security反复弹出，说明公司策略未接受当前浏览器会话"
+            )
+        raise TimeoutError("等待图片网站登录超时，请确认公司网络、账号权限和登录状态")
 
     def _set_download_directory(self, download_dir: Path) -> None:
         download_dir.mkdir(parents=True, exist_ok=True)

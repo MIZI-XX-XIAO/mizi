@@ -56,20 +56,25 @@ git pull --ff-only
 
 ## 开发与测试
 
-开发电脑使用Python 3.12并安装测试依赖：
+开发电脑使用 `uv` 管理Python 3.12、项目`.venv`和锁定依赖：
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -X utf8 -m pip install -r requirements-dev.txt
+uv python install 3.12
+uv sync --frozen
 $env:QT_QPA_PLATFORM="offscreen"
-.\.venv\Scripts\python.exe -X utf8 -m pytest -p no:cacheprovider -q
+uv run --frozen python -X utf8 -m pytest -p no:cacheprovider -q
 ```
+
+`pyproject.toml`是人工维护的依赖入口，`uv.lock`是权威锁文件。`requirements.txt`、
+`requirements-dev.txt`和`requirements-build.txt`仅用于兼容pip部署，由`uv export`生成，不能手工编辑。
+开发时可使用`uv run --frozen python -X utf8 scripts/start_gui.py`启动GUI；公司电脑仍使用
+`setup_company.bat`和`run_gui.bat`，无需安装uv。
 
 普通测试使用运行时生成的临时A/E图片，不需要仓库携带数据。若需运行真实图片端到端测试，将`MEA5S_REAL_DATA_ROOT`设置为包含`products.csv`的本地数据集目录：
 
 ```powershell
 $env:MEA5S_REAL_DATA_ROOT="D:\本地数据\dataset_realistic"
-.\.venv\Scripts\python.exe -X utf8 -m pytest tests\test_real_images_e2e.py -q
+uv run --frozen python -X utf8 -m pytest tests\test_real_images_e2e.py -q
 ```
 
 ## 任务输出
@@ -106,7 +111,7 @@ $env:MEA5S_REAL_DATA_ROOT="D:\本地数据\dataset_realistic"
 
 取消任务会保留部分提取结果；失败任务保留错误编号、状态和 traceback。应用滚动日志位于当前用户的 `LOCALAPPDATA/MEA5SDefectAnalysis/logs/`。
 
-GitHub Actions在Windows和Python 3.12环境中执行无生产数据的依赖安装、分析服务、CSV写入和Qt离屏测试。真实数据不会上传到GitHub Actions。
+GitHub Actions在Windows和Python 3.12环境中使用uv校验锁文件及pip导出文件，并执行无生产数据的分析服务、CSV写入和Qt离屏测试。真实数据不会上传到GitHub Actions。
 
 ## 一键提交到GitHub
 
@@ -132,17 +137,19 @@ GitHub Actions在Windows和Python 3.12环境中执行无生产数据的依赖安
 
 ## 离线安装
 
-联网电脑运行 `python scripts/prepare_offline_dependencies.py`。公司电脑创建虚拟环境后执行：
+联网开发电脑先执行`uv sync --frozen`，再运行
+`uv run --frozen python scripts/prepare_offline_dependencies.py`。脚本直接读取由uv锁定导出的
+`requirements.txt`并生成wheel及SHA-256清单。公司电脑创建虚拟环境后执行：
 
 ```powershell
-python -X utf8 -m pip install --no-index --find-links wheels -r requirements-gui.lock.txt
+python -X utf8 -m pip install --no-index --find-links wheels -r requirements.txt
 ```
 
 ## 便携版发布
 
 ```powershell
-python -m pip install -r requirements-build.txt
-python scripts/build_portable.py --clean
+uv sync --frozen --group build
+uv run --frozen --group build python scripts/build_portable.py --clean
 ```
 
 将整个 `dist/MEA5S缺陷分析/` 目录复制到公司电脑，运行其中的 `MEA5S缺陷分析.exe`，不能只复制单独的 EXE。发布包无需公司电脑安装 Python 或授予管理员权限，`release_manifest.json` 保存发布文件SHA-256。
@@ -165,5 +172,8 @@ python scripts/build_portable.py --clean
 - LDAP密码仅在本次后台任务内存中使用，不保存到配置、日志或任务清单。
 
 图片网站依赖公司网络、企业证书及登录权限。便携版应携带与公司Edge主版本一致的 `image_downloader/msedgedriver.exe`；未携带时程序会尝试通过Selenium Manager解析驱动。
+程序使用 `%LOCALAPPDATA%/MEA5SDefectAnalysis/edge-image-profile/` 中的软件专用普通Edge配置，
+不会占用日常Edge配置。首次使用需在Edge中完成公司认证；如出现Windows Security系统窗口，
+请手动输入凭据，认证成功后程序会自动继续并在后续任务中复用登录状态。
 
 发布验收可使用 `--validate-images products.csv --image-root 图片路径根目录 --report 报告.json`，让便携版实际解码首组A/E图片并输出四个复核场景的检查结果。

@@ -144,6 +144,9 @@ def test_image_download_dialog_reads_mes_products_and_uses_safe_defaults(qtbot, 
     assert dialog._selected_codes() == ()
     assert dialog._quality() == ""
     assert dialog.password_edit.echoMode() == QLineEdit.Password
+    assert "普通Edge" in dialog.login_hint.text()
+    assert "Windows Security" in dialog.login_hint.text()
+    assert dialog.login_hint.isVisible()
     dialog.close(); window.close(); window.deleteLater()
 
 
