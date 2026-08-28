@@ -31,6 +31,7 @@ from .defect_evidence import (
 )
 from .pattern_analyzer import OnlinePatternEngine
 from .process_relationships import analyze_process_relationships
+from .nonlinear_relationships import enrich_findings, sort_findings
 
 
 STAGES = ("VALIDATING", "EXTRACTING", "ANALYZING", "WRITING", "VISUALIZING", "COMPLETE")
@@ -449,6 +450,12 @@ def run_excel_target_task(
         bin_parts: list[pd.DataFrame] = []
         model_parts: list[pd.DataFrame] = []
         joined_parts: list[pd.DataFrame] = []
+        nonlinear_importance_parts: list[pd.DataFrame] = []
+        nonlinear_effect_parts: list[pd.DataFrame] = []
+        risk_curve_parts: list[pd.DataFrame] = []
+        interaction_parts: list[pd.DataFrame] = []
+        validation_parts: list[pd.DataFrame] = []
+        finding_parts: list[pd.DataFrame] = []
         relationship_summaries: list[dict[str, Any]] = []
         if request.selection.includes("process_relationships"):
             defect_events = selected_codes[
@@ -476,6 +483,11 @@ def run_excel_target_task(
                     (bin_parts, result.binned_rates),
                     (model_parts, result.model_importance),
                     (joined_parts, result.joined),
+                    (nonlinear_importance_parts, result.nonlinear_importance),
+                    (nonlinear_effect_parts, result.nonlinear_effects),
+                    (risk_curve_parts, result.risk_curves),
+                    (interaction_parts, result.interactions),
+                    (validation_parts, result.model_validation),
                 ):
                     enriched = frame.copy()
                     for name, value in reversed(tuple(metadata.items())):
@@ -484,6 +496,7 @@ def run_excel_target_task(
                         else:
                             enriched.insert(0, name, value)
                     destination.append(enriched)
+                finding_parts.append(enrich_findings(result.findings, **metadata))
                 relationship_summaries.append({**metadata, **result.summary})
                 callbacks.on_progress(ProgressEvent(
                     "ANALYZING", None, target_index, len(targets),
@@ -502,6 +515,12 @@ def run_excel_target_task(
             "process_parameter_binned_rates.csv": pd.concat(bin_parts, ignore_index=True) if bin_parts else pd.DataFrame(),
             "process_model_importance.csv": pd.concat(model_parts, ignore_index=True) if model_parts else pd.DataFrame(),
             "process_joined.csv": pd.concat(joined_parts, ignore_index=True) if joined_parts else pd.DataFrame(),
+            "process_nonlinear_importance.csv": pd.concat(nonlinear_importance_parts, ignore_index=True) if nonlinear_importance_parts else pd.DataFrame(),
+            "process_nonlinear_effects.csv": pd.concat(nonlinear_effect_parts, ignore_index=True) if nonlinear_effect_parts else pd.DataFrame(),
+            "process_risk_curves.csv": pd.concat(risk_curve_parts, ignore_index=True) if risk_curve_parts else pd.DataFrame(),
+            "process_interactions.csv": pd.concat(interaction_parts, ignore_index=True) if interaction_parts else pd.DataFrame(),
+            "process_model_validation.csv": pd.concat(validation_parts, ignore_index=True) if validation_parts else pd.DataFrame(),
+            "association_findings.csv": sort_findings(pd.concat(finding_parts, ignore_index=True)) if finding_parts else pd.DataFrame(),
             "extracted_defects.csv": empty_extracted,
             "spatial_clusters.csv": empty_result,
             "discovered_patterns.csv": empty_result,
@@ -517,6 +536,12 @@ def run_excel_target_task(
         for filename, frame in frames_to_write.items():
             frame.to_csv(work_dir / filename, index=False, encoding="utf-8-sig")
         write_json(work_dir / "process_relationship_summary.json", relationship_summaries)
+        write_json(
+            work_dir / "association_findings.json",
+            frames_to_write["association_findings.csv"].astype(object).where(
+                pd.notna(frames_to_write["association_findings.csv"]), None
+            ).to_dict("records"),
+        )
         summary = {
             "task_name": request.task_name, "status": "complete",
             "analyzed_product_count": len(products), "extracted_defect_count": 0,
@@ -533,6 +558,9 @@ def run_excel_target_task(
             "analysis_mode": "excel_only", "enabled_scopes": list(request.selection.scopes),
             "analysis_selection": selection_payload, "image_analysis_executed": False,
             "relationship_targets": relationship_summaries,
+            "top_association_findings": frames_to_write["association_findings.csv"].head(10).astype(object).where(
+                pd.notna(frames_to_write["association_findings.csv"].head(10)), None
+            ).to_dict("records"),
         }
         write_json(work_dir / "analysis_summary.json", summary)
         write_json(work_dir / "task_status.json", {"status": "complete", "message": ""})
@@ -552,6 +580,12 @@ def run_excel_target_task(
             "process_bins": frames_to_write["process_parameter_binned_rates.csv"],
             "process_models": frames_to_write["process_model_importance.csv"],
             "process_joined": frames_to_write["process_joined.csv"],
+            "process_nonlinear_importance": frames_to_write["process_nonlinear_importance.csv"],
+            "process_nonlinear_effects": frames_to_write["process_nonlinear_effects.csv"],
+            "process_risk_curves": frames_to_write["process_risk_curves.csv"],
+            "process_interactions": frames_to_write["process_interactions.csv"],
+            "process_validation": frames_to_write["process_model_validation.csv"],
+            "association_findings": frames_to_write["association_findings.csv"],
         })
     except InterruptedError:
         write_json(work_dir / "task_status.json", {"status": "cancelled", "message": "用户取消"})

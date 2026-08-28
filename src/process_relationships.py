@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .data_quality import DataQualityReport, validate_process_parameters, validate_products
+from .nonlinear_relationships import analyze_nonlinear_relationships
 
 
 EXACT_KEYS = ("product_id", "order_code", "dmc_raw", "global_order")
@@ -23,6 +24,12 @@ class ProcessRelationshipResult:
     model_importance: pd.DataFrame
     summary: dict[str, Any]
     quality_reports: list[DataQualityReport]
+    nonlinear_importance: pd.DataFrame
+    nonlinear_effects: pd.DataFrame
+    risk_curves: pd.DataFrame
+    interactions: pd.DataFrame
+    model_validation: pd.DataFrame
+    findings: pd.DataFrame
 
 
 def _auc_score(y_true: np.ndarray, scores: np.ndarray) -> float | None:
@@ -208,11 +215,16 @@ def analyze_process_relationships(
         joined.sort_values("global_order"), parameter_names, "has_detected_defect"
     )
     matched = int(joined["match_quality"].ne("unmatched").sum())
+    match_rate = matched / len(joined) if len(joined) else 0.0
+    nonlinear = analyze_nonlinear_relationships(
+        joined.sort_values("global_order").reset_index(drop=True), parameter_names,
+        match_rate=match_rate,
+    )
     summary = {
         "join_key": join_key,
         "product_count": len(joined),
         "matched_count": matched,
-        "match_rate": round(matched / len(joined), 4) if len(joined) else 0.0,
+        "match_rate": round(match_rate, 4),
         "parameter_count": len(parameter_names),
         "defective_product_count": int(joined["has_detected_defect"].sum()),
         "warning": "统计关联不等于因果关系；结论需结合工艺机理和受控实验验证。",
@@ -222,7 +234,7 @@ def analyze_process_relationships(
             else "low_positive_sample" if int(joined["has_detected_defect"].sum()) < 10
             else "ok"
         ),
-        **model_summary,
+        **model_summary, **nonlinear["summary"],
     }
     return ProcessRelationshipResult(
         joined=joined,
@@ -231,4 +243,10 @@ def analyze_process_relationships(
         model_importance=importance,
         summary=summary,
         quality_reports=[product_report, parameter_report],
+        nonlinear_importance=nonlinear["nonlinear_importance"],
+        nonlinear_effects=nonlinear["nonlinear_effects"],
+        risk_curves=nonlinear["risk_curves"],
+        interactions=nonlinear["interactions"],
+        model_validation=nonlinear["model_validation"],
+        findings=nonlinear["findings"],
     )

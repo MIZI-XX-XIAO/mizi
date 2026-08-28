@@ -12,7 +12,7 @@
 3. 执行分析：后台提取缺陷并显示进度、资源使用、预计时间和实时告警。
 4. 结果概览：分别查看代码规律、图片空间规律或二者联合规律，支持AOI/VI来源、单个或多个缺陷代码筛选。
 5. Excel分析：读取测试工作簿，统计State、Tolerance超差、判定冲突、趋势和分组质量。
-6. 关联分析：分析数值工艺参数与图片缺陷之间的相关性、效应量、区间缺陷率和模型重要性。
+6. 关联分析：按综合证据分优先展示Top 10重点发现，并分析数值工艺参数与图片/AOI/VI缺陷之间的线性、非线性、阈值和双参数交互关系。
 7. 图片复核：查看 A图、E图、差异图和Mask，支持检测框、同步缩放拖动、缺陷导航及局部原图。
 
 窗口会适配常见办公电脑分辨率和 Windows DPI 缩放，并记忆窗口、路径、表格列宽及复核布局。
@@ -96,6 +96,10 @@ uv run --frozen python -X utf8 -m pytest tests\test_real_images_e2e.py -q
 - `process_parameter_metrics.csv`
 - `process_parameter_binned_rates.csv`
 - `process_model_importance.csv`
+- `process_nonlinear_importance.csv`、`process_nonlinear_effects.csv`
+- `process_risk_curves.csv`
+- `process_interactions.csv`、`process_model_validation.csv`
+- `association_findings.csv`、`association_findings.json`
 - `process_joined.csv`（纯Excel目标任务）
 - `process_relationship_summary.json`
 

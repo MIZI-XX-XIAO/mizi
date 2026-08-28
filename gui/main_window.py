@@ -27,10 +27,12 @@ from src.app_runtime import APP_VERSION, configure_logging, new_error_id, user_d
 from src.data_quality import DataQualityReport, validate_products
 from src.defect_relationships import analyze_defect_relationships
 from src.result_views import ResultView, build_result_view, pattern_count
-from src.process_relationships import analyze_process_relationships
+from src.nonlinear_relationships import build_unified_findings, enrich_findings
 from .image_viewer import ImageReviewWidget
 from .analysis_worker import AnalysisWorker
 from .dataframe_table import DataFrameTableWidget
+from .association_findings import AssociationFindingsWidget
+from .relationship_worker import RelationshipWorker
 from .result_dialogs import ResultDetailsWidget
 from .parameter_dialog import ParameterDialog
 from .workbench import ElidedLabel, LayoutProfile, WorkbenchShell, WorkbenchStack
@@ -67,6 +69,8 @@ class MainWindow(QMainWindow):
         self.config_modified = False
         self.thread: QThread | None = None
         self.worker: AnalysisWorker | None = None
+        self.relationship_thread: QThread | None = None
+        self.relationship_worker: RelationshipWorker | None = None
         self.current_result: AnalysisResult | None = None
         self.current_excel_result: ExcelAnalysisResult | None = None
         self._result_config: dict[str, Any] = {}
@@ -687,9 +691,12 @@ class MainWindow(QMainWindow):
         self.time_tolerance.setRange(0, 86400)
         self.time_tolerance.setValue(int(self.settings.value("process/tolerance_seconds", 60)))
         self.time_tolerance.setSuffix(" 秒")
-        analyze = QPushButton("分析工艺关联")
-        analyze.setObjectName("primaryButton")
-        analyze.clicked.connect(self._analyze_process_parameters)
+        self.relationship_analyze = QPushButton("分析工艺关联")
+        self.relationship_analyze.setObjectName("primaryButton")
+        self.relationship_analyze.clicked.connect(self._analyze_process_parameters)
+        self.relationship_cancel = QPushButton("取消关联分析")
+        self.relationship_cancel.setEnabled(False)
+        self.relationship_cancel.clicked.connect(self._cancel_relationship_analysis)
         self.use_current_excel = QCheckBox("使用当前Excel分析结果")
         self.use_current_excel.setEnabled(False)
         controls.addWidget(process_row, 0, 0, 1, 5)
@@ -697,12 +704,22 @@ class MainWindow(QMainWindow):
         controls.addWidget(QLabel("时间匹配容差"), 1, 1)
         controls.addWidget(self.time_tolerance, 1, 2)
         controls.setColumnStretch(3, 1)
-        controls.addWidget(analyze, 1, 4)
+        controls.addWidget(self.relationship_analyze, 1, 4)
+        controls.addWidget(self.relationship_cancel, 1, 5)
         self.relationship_summary = QLabel("完成缺陷分析后，可加载工艺参数表进行关联分析。")
         self.relationship_summary.setWordWrap(True)
+        self.association_findings = AssociationFindingsWidget()
+        self.association_findings.detail_requested.connect(self._show_association_finding_detail)
+        self.association_findings.image_requested.connect(self._jump_from_association_finding)
         self.relationship_metrics = DataFrameTableWidget("process_metrics")
         self.relationship_bins = DataFrameTableWidget("process_bins")
         self.relationship_model = DataFrameTableWidget("process_model")
+        self.relationship_nonlinear_importance = DataFrameTableWidget("process_nonlinear_importance")
+        self.relationship_nonlinear = DataFrameTableWidget("process_nonlinear_effects")
+        self.relationship_curves = DataFrameTableWidget("process_risk_curves")
+        self.relationship_interactions = DataFrameTableWidget("process_interactions")
+        self.relationship_validation = DataFrameTableWidget("process_model_validation")
+        self.relationship_samples = DataFrameTableWidget("process_joined")
         self.code_space_widget = DataFrameTableWidget("code_space_associations")
         self.code_conflict_widget = DataFrameTableWidget("code_label_conflicts")
         self.trajectory_widget = DataFrameTableWidget("spatial_trajectories")
@@ -716,15 +733,26 @@ class MainWindow(QMainWindow):
         tables.addTab(self.relationship_metrics, "统计与效应量")
         tables.addTab(self.relationship_bins, "区间缺陷率")
         tables.addTab(self.relationship_model, "模型重要性")
+        tables.addTab(self.relationship_nonlinear_importance, "非线性重要性")
+        tables.addTab(self.relationship_nonlinear, "非线性阈值")
+        tables.addTab(self.relationship_curves, "风险曲线")
+        tables.addTab(self.relationship_interactions, "参数交互")
+        tables.addTab(self.relationship_validation, "模型验证")
+        tables.addTab(self.relationship_samples, "关联样本")
         tables.addTab(self.code_space_widget, "代码—空间关联")
         tables.addTab(self.code_conflict_widget, "AOI—VI一致性")
         tables.addTab(self.trajectory_widget, "水平轨迹")
         tables.addTab(self.attribution_widget, "工站归因证据")
+        self.relationship_details = tables
+        relationship_views = QTabWidget()
+        relationship_views.addTab(self.association_findings, "重点发现 Top 10")
+        relationship_views.addTab(tables, "详细证据")
+        self.relationship_views = relationship_views
         layout.addWidget(title)
         layout.addWidget(warning)
         layout.addLayout(controls)
         layout.addWidget(self.relationship_summary)
-        layout.addWidget(tables, 1)
+        layout.addWidget(relationship_views, 1)
         self.tabs.addTab(page, "⑥ 关联分析")
 
     def _build_excel_tab(self) -> None:
@@ -1430,6 +1458,7 @@ class MainWindow(QMainWindow):
         )
         if not result.summary.get("image_analysis_executed", True):
             self._show_process_result_frames(result)
+        self._refresh_unified_findings(result.frames.get("association_findings", pd.DataFrame()))
         self.tabs.setCurrentIndex(3)
         self._maybe_auto_relationship()
 
@@ -1437,6 +1466,12 @@ class MainWindow(QMainWindow):
         self.relationship_metrics.set_frame(result.frames.get("process_metrics", pd.DataFrame()))
         self.relationship_bins.set_frame(result.frames.get("process_bins", pd.DataFrame()))
         self.relationship_model.set_frame(result.frames.get("process_models", pd.DataFrame()))
+        self.relationship_nonlinear_importance.set_frame(result.frames.get("process_nonlinear_importance", pd.DataFrame()))
+        self.relationship_nonlinear.set_frame(result.frames.get("process_nonlinear_effects", pd.DataFrame()))
+        self.relationship_curves.set_frame(result.frames.get("process_risk_curves", pd.DataFrame()))
+        self.relationship_interactions.set_frame(result.frames.get("process_interactions", pd.DataFrame()))
+        self.relationship_validation.set_frame(result.frames.get("process_validation", pd.DataFrame()))
+        self.relationship_samples.set_frame(result.frames.get("process_joined", pd.DataFrame()))
         summaries = result.summary.get("relationship_targets", [])
         if summaries:
             lines = [
@@ -1452,6 +1487,68 @@ class MainWindow(QMainWindow):
         joined = result.frames.get("process_joined", pd.DataFrame())
         if not joined.empty:
             self.review.set_process_data(joined)
+
+    def _refresh_unified_findings(self, process_findings: pd.DataFrame | None = None) -> None:
+        if self.current_result is None:
+            return
+        frames = self.current_result.frames
+        findings = build_unified_findings(
+            process_findings=process_findings,
+            code_space=frames.get("code_space", pd.DataFrame()),
+            cooccurrence=getattr(self, "_cooccurrence_frame", pd.DataFrame()),
+            transitions=getattr(self, "_transition_frame", pd.DataFrame()),
+            trajectories=frames.get("trajectories", pd.DataFrame()),
+            attribution=frames.get("station_attribution", pd.DataFrame()),
+            conflicts=frames.get("code_conflicts", pd.DataFrame()),
+            product_count=len(frames.get("products", pd.DataFrame())),
+        )
+        frames["association_findings"] = findings
+        self.association_findings.set_findings(findings)
+        output = self.current_result.output_dir
+        findings.to_csv(output / "association_findings.csv", index=False, encoding="utf-8-sig")
+        records = findings.astype(object).where(pd.notna(findings), None).to_dict("records")
+        (output / "association_findings.json").write_text(
+            json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self.current_result.summary["top_association_findings"] = records[:10]
+        summary_path = output / "analysis_summary.json"
+        if summary_path.is_file():
+            summary_path.write_text(
+                json.dumps(self.current_result.summary, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+    def _show_association_finding_detail(self, finding: pd.Series) -> None:
+        detail_type = str(finding.get("detail_type", ""))
+        process_samples = finding.get("requested_action") == "samples" and detail_type in {
+            "nonlinear_effect", "interaction"
+        }
+        widget = self.relationship_samples if process_samples else {
+            "nonlinear_effect": self.relationship_curves,
+            "interaction": self.relationship_interactions,
+            "code_space": self.code_space_widget,
+            "conflict": self.code_conflict_widget,
+            "trajectory": self.trajectory_widget,
+            "attribution": self.attribution_widget,
+        }.get(detail_type, self.relationship_metrics)
+        self.relationship_views.setCurrentIndex(1)
+        self.relationship_details.setCurrentWidget(widget)
+        key = str(finding.get("target", "")) if process_samples else str(finding.get("detail_key", ""))
+        if key:
+            widget.search.setText(key)
+
+    def _jump_from_association_finding(self, finding: pd.Series) -> None:
+        if self.current_result is None:
+            return
+        detail_type, key = str(finding.get("detail_type", "")), str(finding.get("detail_key", ""))
+        frame, column = {
+            "trajectory": (self.current_result.frames.get("trajectories", pd.DataFrame()), "trajectory_id"),
+            "code_space": (self.current_result.frames.get("code_space", pd.DataFrame()), "spatial_id"),
+            "attribution": (self.current_result.frames.get("station_attribution", pd.DataFrame()), "evidence_id"),
+        }.get(detail_type, (pd.DataFrame(), ""))
+        if not frame.empty and column in frame:
+            match = frame[frame[column].astype(str).eq(key)]
+            if not match.empty:
+                self._jump_from_pattern(match.iloc[0])
 
     def _maybe_auto_relationship(self) -> None:
         """统一工站任务的Excel和图片都完成后自动关联。"""
@@ -1842,7 +1939,7 @@ class MainWindow(QMainWindow):
             selection_mode = str(selection_data.get("mode", "all"))
             selected_target_keys = set(map(str, selection_data.get("defect_codes", [])))
             selected_parameters = tuple(map(str, selection_data.get("process_parameters", [])))
-            relationship_results: list[tuple[str, str, Any]] = []
+            relationship_jobs: list[tuple] = []
             scopes = (
                 products_frame["analysis_scope"].dropna().astype(str).drop_duplicates().tolist()
                 if "analysis_scope" in products_frame else ["全部"]
@@ -1910,59 +2007,131 @@ class MainWindow(QMainWindow):
                         orders = scope_products.loc[has_code, "global_order"]
                         targets.append((f"VI_CODE_{code}", "VI_BLOCK", str(code), pd.DataFrame({"global_order": orders, "component_area": 1})))
                 for target_name, source_type, canonical_code, target_defects in targets:
-                    relationship_results.append((scope, target_name, source_type, canonical_code, analyze_process_relationships(
-                        scope_products, target_defects, parameters, self.time_tolerance.value(),
-                        selected_parameters=selected_parameters,
-                    )))
-            if not relationship_results:
+                    relationship_jobs.append((
+                        scope, target_name, source_type, canonical_code,
+                        scope_products, target_defects,
+                    ))
+            if not relationship_jobs:
                 raise ValueError("所选缺陷代码在当前图片产品总体中没有足够的可关联样本")
-            scope, target_name, _source_type, _canonical_code, result = relationship_results[0]
-            metric_parts = []
-            bin_parts = []
-            model_parts = []
-            summary_rows = []
-            for scope_name, target, source_type, canonical_code, item in relationship_results:
-                for parts, frame in ((metric_parts, item.parameter_metrics), (bin_parts, item.binned_rates), (model_parts, item.model_importance)):
-                    enriched = frame.copy()
-                    enriched.insert(0, "target", target)
-                    enriched.insert(0, "canonical_code", canonical_code)
-                    enriched.insert(0, "source_type", source_type)
-                    enriched.insert(0, "analysis_scope", scope_name)
-                    parts.append(enriched)
-                summary_rows.append({
-                    "analysis_scope": scope_name, "source_type": source_type,
-                    "canonical_code": canonical_code, "target": target, **item.summary,
-                })
-            combined_metrics = pd.concat(metric_parts, ignore_index=True)
-            combined_bins = pd.concat(bin_parts, ignore_index=True)
-            combined_models = pd.concat(model_parts, ignore_index=True)
-            self.relationship_metrics.set_frame(combined_metrics)
-            self.relationship_bins.set_frame(combined_bins)
-            self.relationship_model.set_frame(combined_models)
-            self.relationship_summary.setText("；".join(
-                f"{item['analysis_scope']} {item['target']}：匹配{item['matched_count']}/"
-                f"{item['product_count']}，正样本{item['defective_product_count']}，"
-                f"参数{item['parameter_count']}，验证{item['validation_method']}，"
-                f"AUC {item['validation_auc'] if item['validation_auc'] is not None else '-'}"
-                for item in summary_rows
-            ))
-            output = self.current_result.output_dir
-            combined_metrics.to_csv(
-                output / "process_parameter_metrics.csv", index=False, encoding="utf-8-sig"
-            )
-            combined_bins.to_csv(
-                output / "process_parameter_binned_rates.csv", index=False, encoding="utf-8-sig"
-            )
-            combined_models.to_csv(
-                output / "process_model_importance.csv", index=False, encoding="utf-8-sig"
-            )
-            (output / "process_relationship_summary.json").write_text(
-                json.dumps(summary_rows, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            self.review.set_process_data(result.joined)
-            self.statusBar().showMessage("工艺参数关联分析完成", 5000)
+            self._start_relationship_worker(relationship_jobs, parameters, selected_parameters)
+            return
         except Exception as exc:
             self._show_error("工艺参数关联分析失败", exc)
+
+    def _start_relationship_worker(self, jobs: list[tuple], parameters: pd.DataFrame,
+                                   selected_parameters: tuple[str, ...]) -> None:
+        if self.relationship_thread is not None:
+            return
+        self.relationship_thread = QThread(self)
+        self.relationship_worker = RelationshipWorker(
+            jobs, parameters, self.time_tolerance.value(), selected_parameters
+        )
+        self.relationship_worker.moveToThread(self.relationship_thread)
+        self.relationship_thread.started.connect(self.relationship_worker.run)
+        self.relationship_worker.completed.connect(self._apply_relationship_results)
+        self.relationship_worker.progress.connect(
+            lambda done, total, target: self.relationship_summary.setText(
+                f"正在分析 {target}（{done + 1}/{total}）…可随时取消，旧结果会保留。"
+            )
+        )
+        self.relationship_worker.failed.connect(
+            lambda message: self._show_error("工艺参数关联分析失败", RuntimeError(message))
+        )
+        self.relationship_worker.cancelled.connect(
+            lambda: self.relationship_summary.setText("关联分析已取消，原有结果未被覆盖。")
+        )
+        self.relationship_worker.finished.connect(self.relationship_thread.quit)
+        self.relationship_thread.finished.connect(self._relationship_thread_finished)
+        self.relationship_analyze.setEnabled(False)
+        self.relationship_cancel.setEnabled(True)
+        self.relationship_summary.setText("正在启动非线性关联分析…")
+        self.relationship_thread.start()
+
+    def _cancel_relationship_analysis(self) -> None:
+        if self.relationship_worker is not None:
+            self.relationship_worker.cancel()
+            self.relationship_summary.setText("正在安全取消；当前目标分析完成后停止…")
+
+    def _relationship_thread_finished(self) -> None:
+        self.relationship_analyze.setEnabled(True)
+        self.relationship_cancel.setEnabled(False)
+        if self.relationship_worker is not None:
+            self.relationship_worker.deleteLater()
+        if self.relationship_thread is not None:
+            self.relationship_thread.deleteLater()
+        self.relationship_worker = None
+        self.relationship_thread = None
+
+    @Slot(object)
+    def _apply_relationship_results(self, relationship_results: list[tuple]) -> None:
+        if not relationship_results or self.current_result is None:
+            return
+        groups = {
+            "metrics": [], "bins": [], "models": [], "nonlinear_importance": [], "nonlinear": [],
+            "curves": [], "interactions": [], "validation": [], "samples": [], "findings": [],
+        }
+        summary_rows = []
+        first_result = relationship_results[0][4]
+        for scope, target, source, code, result in relationship_results:
+            metadata = {
+                "analysis_scope": scope, "source_type": source,
+                "canonical_code": code, "target": target,
+            }
+            for key, frame in (
+                ("metrics", result.parameter_metrics), ("bins", result.binned_rates),
+                ("models", result.model_importance),
+                ("nonlinear_importance", result.nonlinear_importance),
+                ("nonlinear", result.nonlinear_effects),
+                ("curves", result.risk_curves),
+                ("interactions", result.interactions), ("validation", result.model_validation),
+                ("samples", result.joined),
+            ):
+                enriched = frame.copy()
+                for name, value in reversed(tuple(metadata.items())):
+                    enriched.insert(0, name, value)
+                groups[key].append(enriched)
+            groups["findings"].append(enrich_findings(result.findings, **metadata))
+            summary_rows.append({**metadata, **result.summary})
+        combined = {
+            key: pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+            for key, parts in groups.items()
+        }
+        self.relationship_metrics.set_frame(combined["metrics"])
+        self.relationship_bins.set_frame(combined["bins"])
+        self.relationship_model.set_frame(combined["models"])
+        self.relationship_nonlinear_importance.set_frame(combined["nonlinear_importance"])
+        self.relationship_nonlinear.set_frame(combined["nonlinear"])
+        self.relationship_curves.set_frame(combined["curves"])
+        self.relationship_interactions.set_frame(combined["interactions"])
+        self.relationship_validation.set_frame(combined["validation"])
+        self.relationship_samples.set_frame(combined["samples"])
+        self.relationship_summary.setText("；".join(
+            f"{row['analysis_scope']} {row['target']}：匹配{row['matched_count']}/{row['product_count']}，"
+            f"正样本{row['defective_product_count']}，非线性AUC "
+            f"{row.get('nonlinear_auc') if row.get('nonlinear_auc') is not None else '-'}"
+            for row in summary_rows
+        ))
+        output = self.current_result.output_dir
+        filenames = {
+            "metrics": "process_parameter_metrics.csv",
+            "bins": "process_parameter_binned_rates.csv",
+            "models": "process_model_importance.csv",
+            "nonlinear_importance": "process_nonlinear_importance.csv",
+            "nonlinear": "process_nonlinear_effects.csv",
+            "curves": "process_risk_curves.csv",
+            "interactions": "process_interactions.csv",
+            "validation": "process_model_validation.csv",
+            "samples": "process_joined.csv",
+        }
+        for key, filename in filenames.items():
+            combined[key].to_csv(output / filename, index=False, encoding="utf-8-sig")
+        (output / "process_relationship_summary.json").write_text(
+            json.dumps(summary_rows, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self.review.set_process_data(first_result.joined)
+        self._refresh_unified_findings(combined["findings"])
+        self.relationship_views.setCurrentIndex(0)
+        self.statusBar().showMessage("工艺参数关联分析完成", 5000)
 
     def _show_error(self, title: str, exc: Exception) -> None:
         error_id = new_error_id()
@@ -2037,6 +2206,12 @@ class MainWindow(QMainWindow):
             if answer == QMessageBox.Yes:
                 self._close_after_cancel = True
                 self._cancel()
+            event.ignore()
+            return
+        if self.relationship_thread and self.relationship_thread.isRunning():
+            answer = QMessageBox.question(self, "关联分析运行中", "先安全取消关联分析再关闭？")
+            if answer == QMessageBox.Yes:
+                self._cancel_relationship_analysis()
             event.ignore()
             return
         event.accept()

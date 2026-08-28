@@ -177,6 +177,13 @@ QLabel#warningBanner, QLabel#successBanner, QLabel#errorBanner, QLabel#privacyBa
     border-radius: 5px; padding: 9px 11px;
 }
 QLabel#warningBanner { color: #F6C578; background: #2B251C; border: 1px solid #70542B; }
+
+QFrame#associationFindingCard {
+    background: #142A40; border: 1px solid #31506C; border-radius: 8px; padding: 6px;
+}
+QLabel#associationFindingBadge { color: #55C9F2; font-weight: 700; font-size: 12pt; }
+QLabel#associationFindingType { color: #B9D8EA; font-weight: 600; }
+QLabel#associationFindingWarning { color: #F6C578; font-size: 9pt; }
 QLabel#successBanner { color: #61D9CB; background: #0F302F; border: 1px solid #21665F; }
 QLabel#errorBanner { color: #FF91A3; background: #351A2A; border: 1px solid #773048; }
 QStatusBar#applicationStatusBar { color: #7186A5; background: #07101D; border-top: 1px solid #213654; }

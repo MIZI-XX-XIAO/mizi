@@ -86,3 +86,11 @@ def test_excel_only_multiple_codes_use_full_population_and_selected_parameters(t
     assert saved["target_product_counts"] == {
         "AOI_FAILURE:5011": 6, "AOI_FAILURE:5022": 3,
     }
+    for filename in (
+        "process_nonlinear_importance.csv", "process_nonlinear_effects.csv",
+        "process_risk_curves.csv",
+        "process_interactions.csv", "process_model_validation.csv",
+        "association_findings.csv", "association_findings.json",
+    ):
+        assert (result.output_dir / filename).is_file()
+    assert "association_findings" in result.frames

@@ -8,6 +8,7 @@ ROOT = Path(SPECPATH).parent
 PANDAS_FORMAT_MODULES = collect_submodules("pandas.io.formats")
 OPENPYXL_MODULES = collect_submodules("openpyxl")
 SELENIUM_MODULES = collect_submodules("selenium")
+SKLEARN_MODULES = collect_submodules("sklearn")
 
 a = Analysis(
     [str(ROOT / "scripts" / "start_gui.py")],
@@ -19,7 +20,7 @@ a = Analysis(
         (str(ROOT.parent / "MES"), "MES"),
         (str(ROOT.parent / "image_downloader"), "image_downloader"),
     ],
-    hiddenimports=PANDAS_FORMAT_MODULES + OPENPYXL_MODULES + SELENIUM_MODULES,
+    hiddenimports=PANDAS_FORMAT_MODULES + OPENPYXL_MODULES + SELENIUM_MODULES + SKLEARN_MODULES,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
