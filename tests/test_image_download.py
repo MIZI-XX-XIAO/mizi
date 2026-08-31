@@ -75,6 +75,38 @@ class FakeDialog(FakeDisplayedText):
         return [self.button]
 
 
+class FakeStepButton(FakeLoginElement):
+    def __init__(self, enabled_states=(True,), click_error: Exception | None = None) -> None:
+        super().__init__()
+        self.enabled_states = list(enabled_states)
+        self.click_error = click_error
+
+    def is_enabled(self) -> bool:
+        if len(self.enabled_states) > 1:
+            return self.enabled_states.pop(0)
+        return self.enabled_states[0]
+
+    def get_attribute(self, _name: str):
+        return None
+
+    def click(self) -> None:
+        if self.click_error is not None:
+            raise self.click_error
+        super().click()
+
+
+class FakeElementRoot:
+    def __init__(self, elements=None) -> None:
+        self.elements = list(elements or [])
+
+    def find_elements(self, _by, _selector):
+        return self.elements
+
+
+class FakeOptionsPane(FakeElementRoot):
+    pass
+
+
 class FakeDirectDriver:
     def __init__(self, count_text: str = "一共 2 个产品号") -> None:
         self.current_url = "https://fuel-cell.apac.bosch.com/customize/download?token=secret"
@@ -434,6 +466,13 @@ def test_direct_entry_fills_newline_dmcs_and_verifies_site_count(tmp_path: Path)
     backend._click_xpath = lambda xpath, root=None: clicked.append(xpath)
     backend._wait_visible = lambda by, selector, timeout=30: textarea
     backend._set_checkbox = lambda label, value, root=None: checked.append((label, value))
+    stages: list[str] = []
+    original_wait_count = backend._wait_recognized_count
+    backend._wait_recognized_count = lambda expected, timeout=30: (
+        stages.append("recognized") or original_wait_count(expected, timeout)
+    )
+    backend._wait_and_click_next = lambda root, timeout=30: stages.append("next")
+    backend._wait_options_pane = lambda timeout=30: stages.append("options") or backend.driver
     products = (_product(1), _product(2))
 
     backend._configure_direct_page(products, ("DA", "DE"), "origin", True)
@@ -445,6 +484,8 @@ def test_direct_entry_fills_newline_dmcs_and_verifies_site_count(tmp_path: Path)
     assert ("EA", False) in checked and ("去除7层返工站", True) in checked
     assert any("new Event('input'" in script for script, _element in backend.driver.scripts)
     assert any("提交2个，网站识别2个" in message for message in messages)
+    assert stages == ["recognized", "next", "options"]
+    assert any("DMC识别完成" in message for message in messages)
     assert all("token=secret" not in message for message in messages)
 
 
@@ -481,6 +522,82 @@ def test_direct_entry_reports_unavailable_controls(
 
     with pytest.raises(RuntimeError, match=expected_message):
         backend._configure_direct_page((_product(1),), ("DA",), "origin", True)
+
+
+def test_next_button_waits_until_enabled_then_clicks(tmp_path: Path, monkeypatch) -> None:
+    messages: list[str] = []
+    button = FakeStepButton((False, True))
+    backend = EdgeImageSiteBackend(tmp_path, log=messages.append, profile_dir=tmp_path / "profile")
+    backend.driver = FakeDirectDriver()
+    backend._By = type("FakeBy", (), {"CSS_SELECTOR": "css", "XPATH": "xpath"})
+    backend._find_first = lambda _selectors: None
+    ticks = iter((0.0, 0.0, 0.5))
+    monkeypatch.setattr("src.image_site_automation.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("src.image_site_automation.time.sleep", lambda _seconds: None)
+
+    backend._wait_and_click_next(FakeElementRoot([button]), timeout=1)
+
+    assert button.clicked
+    assert any("下一步按钮已可用" in message for message in messages)
+    assert any("已点击下一步" in message for message in messages)
+
+
+@pytest.mark.parametrize(
+    ("root", "expected_message"),
+    (
+        (FakeElementRoot(), "未找到下一步按钮"),
+        (FakeElementRoot([FakeStepButton((False,))]), "一直不可用"),
+    ),
+)
+def test_next_button_reports_missing_or_disabled(
+    tmp_path: Path, monkeypatch, root: FakeElementRoot, expected_message: str,
+) -> None:
+    backend = EdgeImageSiteBackend(tmp_path, profile_dir=tmp_path / "profile")
+    backend.driver = FakeDirectDriver()
+    backend._By = type("FakeBy", (), {"CSS_SELECTOR": "css", "XPATH": "xpath"})
+    backend._find_first = lambda _selectors: None
+    ticks = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr("src.image_site_automation.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("src.image_site_automation.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match=expected_message):
+        backend._wait_and_click_next(root, timeout=1)
+
+
+def test_next_button_click_failure_is_explicit(tmp_path: Path) -> None:
+    button = FakeStepButton(click_error=RuntimeError("intercepted"))
+    backend = EdgeImageSiteBackend(tmp_path, profile_dir=tmp_path / "profile")
+    backend.driver = FakeDirectDriver()
+    backend._By = type("FakeBy", (), {"CSS_SELECTOR": "css", "XPATH": "xpath"})
+    backend._find_first = lambda _selectors: None
+
+    with pytest.raises(RuntimeError, match="点击下一步失败.*intercepted"):
+        backend._wait_and_click_next(FakeElementRoot([button]))
+
+
+def test_options_pane_is_reacquired_after_next_step(tmp_path: Path) -> None:
+    messages: list[str] = []
+    code_label = FakeDisplayedText("DA")
+    quality = FakeDisplayedText("只选择原图")
+    new_pane = FakeOptionsPane([quality])
+    driver = FakeDirectDriver()
+    backend = EdgeImageSiteBackend(tmp_path, log=messages.append, profile_dir=tmp_path / "profile")
+    backend.driver = driver
+    backend._By = type("FakeBy", (), {"CSS_SELECTOR": "css", "XPATH": "xpath"})
+    backend._find_first = lambda selectors: (
+        code_label if "el-checkbox__label" in selectors[0][1] else None
+    )
+    backend._confirm_neutral_dialog = lambda: None
+    original_execute = driver.execute_script
+    driver.execute_script = lambda script, element=None: (
+        new_pane if "closest('.el-tab-pane')" in script else original_execute(script, element)
+    )
+
+    result = backend._wait_options_pane()
+
+    assert result is new_pane
+    assert backend._active_download_pane is new_pane
+    assert any("图片选项页加载完成" in message for message in messages)
 
 
 def test_only_semantic_error_dialogs_abort_download(tmp_path: Path) -> None:

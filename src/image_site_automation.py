@@ -16,6 +16,10 @@ from src.app_runtime import user_data_dir
 
 SITE_URL = "https://fuel-cell.apac.bosch.com/customize/download"
 EDGE_PROFILE_DIRNAME = "edge-image-profile"
+SITE_IMAGE_CODES = (
+    "DA", "DB", "DC", "DE", "DX", "DY", "EA", "EB", "EC", "EE", "EX", "EY",
+    "FA", "FB", "FC", "FE", "FX", "FY", "GA", "GB", "GC", "GE", "GX", "GY",
+)
 
 
 class EdgeImageSiteBackend:
@@ -254,7 +258,7 @@ class EdgeImageSiteBackend:
 
     def _set_checkbox(self, label: str, checked: bool, root=None) -> None:
         xpath = (
-            "//label[contains(@class,'el-checkbox')]"
+            ".//label[contains(@class,'el-checkbox')]"
             f"[.//span[contains(@class,'el-checkbox__label') and normalize-space(.)='{label}']]"
         )
         element = self._wait_visible(self._By.XPATH, xpath, root=root)
@@ -291,6 +295,93 @@ class EdgeImageSiteBackend:
         if last_count is not None:
             raise RuntimeError(f"DMC解析数量不一致：提交{expected}个，网站识别{last_count}个")
         raise TimeoutError(f"网站未显示DMC识别数量；本批提交{expected}个")
+
+    @staticmethod
+    def _element_enabled(element) -> bool:
+        try:
+            if not element.is_enabled():
+                return False
+        except AttributeError:
+            pass
+        try:
+            classes = (element.get_attribute("class") or "").lower()
+            disabled = element.get_attribute("disabled")
+            aria_disabled = (element.get_attribute("aria-disabled") or "").lower()
+            return "is-disabled" not in classes and disabled is None and aria_disabled != "true"
+        except AttributeError:
+            return True
+
+    def _wait_and_click_next(self, root, timeout: int = 30) -> None:
+        """在DMC输入步骤内等待并点击已启用的下一步按钮。"""
+        deadline = time.monotonic() + timeout
+        button_seen = False
+        xpath = (
+            ".//button[normalize-space(.)='下一步' or normalize-space(.)='Next' or "
+            ".//span[normalize-space(.)='下一步' or normalize-space(.)='Next']]"
+        )
+        while time.monotonic() < deadline:
+            error_text = self._website_error_text()
+            if error_text:
+                self.log(f"DMC识别后网站报错：{error_text}；页面 {self._safe_current_url()}")
+                raise RuntimeError(error_text)
+            button = self._find_first_within(root, ((self._By.XPATH, xpath),))
+            if button is None:
+                time.sleep(0.25)
+                continue
+            button_seen = True
+            if not self._element_enabled(button):
+                time.sleep(0.25)
+                continue
+            self.log(f"下一步按钮已可用；页面 {self._safe_current_url()}")
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", button,
+                )
+                button.click()
+            except Exception as exc:
+                raise RuntimeError(f"点击下一步失败：{exc}") from exc
+            self.log(f"已点击下一步；页面 {self._safe_current_url()}")
+            return
+        if button_seen:
+            raise RuntimeError(f"网站的下一步按钮在{timeout}秒内一直不可用")
+        raise RuntimeError("网站直接填写DMC页面未找到下一步按钮")
+
+    def _wait_options_pane(self, timeout: int = 30):
+        """下一步可能重绘DOM，因此通过第二步控件重新取得活动区域。"""
+        deadline = time.monotonic() + timeout
+        code_terms = " or ".join(
+            f"normalize-space(.)='{code}'" for code in SITE_IMAGE_CODES
+        )
+        code_xpath = (
+            "//label[contains(@class,'el-checkbox')]"
+            f"[.//span[contains(@class,'el-checkbox__label') and ({code_terms})]]"
+        )
+        quality_xpath = (
+            ".//label[contains(@class,'el-radio')]"
+            "[.//span[contains(.,'只选择原图') or contains(.,'只选择压缩图')]]"
+        )
+        while time.monotonic() < deadline:
+            error_text = self._website_error_text()
+            if error_text:
+                self.log(f"进入图片选项时网站报错：{error_text}；页面 {self._safe_current_url()}")
+                raise RuntimeError(error_text)
+            self._confirm_neutral_dialog()
+            code_label = self._find_first(((self._By.XPATH, code_xpath),))
+            if code_label is not None:
+                pane = self.driver.execute_script(
+                    "return arguments[0].closest('.el-tab-pane') || "
+                    "arguments[0].closest('.batch-download-main');",
+                    code_label,
+                ) or self.driver
+                quality = self._find_first_within(pane, ((self._By.XPATH, quality_xpath),))
+                if quality is not None:
+                    self._active_download_pane = pane
+                    self.log(f"图片选项页加载完成；页面 {self._safe_current_url()}")
+                    return pane
+            time.sleep(0.25)
+        raise TimeoutError(
+            f"点击下一步后，图片代码和质量选项在{timeout}秒内未出现"
+        )
 
     def _configure_direct_page(
         self, product_ids: Sequence[str], image_codes: Sequence[str], quality: str, skip_rework: bool,
@@ -333,11 +424,11 @@ class EdgeImageSiteBackend:
             f"直接填写DMC：提交{len(product_ids)}个，网站识别{recognized}个；"
             f"页面 {self._safe_current_url()}"
         )
+        self.log("DMC识别完成，正在进入图片选项")
+        self._wait_and_click_next(pane)
+        pane = self._wait_options_pane()
         selected = set(image_codes)
-        for code in (
-            "DA", "DB", "DC", "DE", "DX", "DY", "EA", "EB", "EC", "EE", "EX", "EY",
-            "FA", "FB", "FC", "FE", "FX", "FY", "GA", "GB", "GC", "GE", "GX", "GY",
-        ):
+        for code in SITE_IMAGE_CODES:
             self._set_checkbox(code, code in selected, root=pane)
         self._set_checkbox("去除7层返工站", skip_rework, root=pane)
         quality_label = "只选择原图" if quality == "origin" else "只选择压缩图"
@@ -428,6 +519,10 @@ class EdgeImageSiteBackend:
         self._set_download_directory(download_dir)
         before = {path.resolve() for path in download_dir.glob("*.zip")}
         self._configure_direct_page(product_ids, image_codes, quality, skip_rework)
+        self.log(
+            f"图片选项已配置，开始下载：{len(product_ids)}个DMC，"
+            f"代码 {'+'.join(image_codes)}；页面 {self._safe_current_url()}"
+        )
         self._click_xpath(
             ".//button[contains(@class,'el-button--primary') and contains(.,'开始下载')]",
             root=self._active_download_pane,
