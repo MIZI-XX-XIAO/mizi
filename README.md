@@ -166,7 +166,7 @@ uv run --frozen --group build python scripts/build_portable.py --clean
 
 ## 公司图片网站下载
 
-在“新建任务”中点击“从公司网站自动下载图片…”，或者在MES下载完成后点击“继续下载图片”。程序会从MES工作簿提取25位 `Ident No.`，使用Edge打开公司图片网站，并通过Excel导入模式分批下载图片。
+在“新建任务”中点击“从公司网站自动下载图片…”，或者在MES下载完成后点击“继续下载图片”。程序会从MES工作簿提取25位 `Ident No.`，使用Edge打开公司图片网站，并在直接输入页逐行填写DMC后分批下载图片，不使用网站的Excel导入入口。
 
 - 默认每批80个产品号，最大不能超过100个。
 - 图片代码和原图/压缩图由每次任务明确选择；“去除7层返工站”默认开启。
@@ -176,6 +176,7 @@ uv run --frozen --group build python scripts/build_portable.py --clean
 - LDAP密码仅在本次后台任务内存中使用，不保存到配置、日志或任务清单。
 - 产品号只取自 `MS03106`、`MS03206`、`MS03301`、`MS03302` 四个AOI工站；专用页签缺失时按工站位置兜底。
 - 多工站任务按D/E/F/G图片族独立分批，不会把一个AOI工站的产品号交叉请求到其他工站。
+- 每个任务保存 `image_download_run.log`，记录网站识别数量、批次状态和原始报错，便于现场排查。
 
 图片网站依赖公司网络、企业证书及登录权限。便携版应携带与公司Edge主版本一致的 `image_downloader/msedgedriver.exe`；未携带时程序会尝试通过Selenium Manager解析驱动。
 程序使用 `%LOCALAPPDATA%/MEA5SDefectAnalysis/edge-image-profile/` 中的软件专用普通Edge配置，

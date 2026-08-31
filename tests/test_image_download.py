@@ -12,7 +12,7 @@ import pytest
 
 from src.image_download import (
     ImageDownloadOrchestrator, ImageDownloadRequest, ProductIdSummary,
-    create_product_template, extract_and_classify_archive, extract_product_ids,
+    extract_and_classify_archive, extract_product_ids,
 )
 from src.image_site_automation import EdgeImageSiteBackend
 
@@ -43,6 +43,58 @@ class FakeLoginElement:
     def click(self) -> None:
         self.clicked = True
 
+    def is_displayed(self) -> bool:
+        return True
+
+
+class FakeTextArea:
+    def __init__(self) -> None:
+        self.value = "old"
+
+    def clear(self) -> None:
+        self.value = ""
+
+    def send_keys(self, value: str) -> None:
+        self.value += value
+
+
+class FakeDisplayedText:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def is_displayed(self) -> bool:
+        return True
+
+
+class FakeDialog(FakeDisplayedText):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.button = FakeLoginElement()
+
+    def find_elements(self, _by, _selector):
+        return [self.button]
+
+
+class FakeDirectDriver:
+    def __init__(self, count_text: str = "一共 2 个产品号") -> None:
+        self.current_url = "https://fuel-cell.apac.bosch.com/customize/download?token=secret"
+        self.count_text = count_text
+        self.scripts: list[tuple[str, object]] = []
+        self.dialogs: list[FakeDialog] = []
+
+    def get(self, _url: str) -> None:
+        pass
+
+    def execute_script(self, script: str, element=None) -> None:
+        self.scripts.append((script, element))
+
+    def find_elements(self, _by, selector: str):
+        if "一共" in selector:
+            return [FakeDisplayedText(self.count_text)]
+        if selector == ".el-message-box":
+            return self.dialogs
+        return []
+
 
 def _product(index: int) -> str:
     return f"P{index:024d}"
@@ -64,7 +116,7 @@ class FakeBackend:
 
     def download_batch(
         self, product_ids, image_codes, quality, skip_rework,
-        template_path, download_dir, stop_event,
+        download_dir, stop_event,
     ) -> Path:
         products, codes = tuple(product_ids), tuple(image_codes)
         self.calls.append((products, codes))
@@ -85,7 +137,7 @@ class OmitOnceBackend(FakeBackend):
     def __init__(self, omitted_product: str, omitted_code: str) -> None:
         super().__init__(); self.omitted_product = omitted_product; self.omitted_code = omitted_code
 
-    def download_batch(self, product_ids, image_codes, quality, skip_rework, template_path, download_dir, stop_event):
+    def download_batch(self, product_ids, image_codes, quality, skip_rework, download_dir, stop_event):
         products, codes = tuple(product_ids), tuple(image_codes)
         self.calls.append((products, codes))
         archive = download_dir / f"result_{len(self.calls)}.zip"
@@ -102,16 +154,6 @@ def _request(tmp_path: Path, codes=("DA", "DE"), batch_size=80) -> ImageDownload
     workbook = tmp_path / "source.xlsx"
     Workbook().save(workbook)
     return ImageDownloadRequest(workbook, tmp_path / "output", tuple(codes), "origin", batch_size=batch_size)
-
-
-def test_product_template_has_ignored_first_row(tmp_path: Path) -> None:
-    products = [_product(1), _product(2)]
-    path = create_product_template(tmp_path / "template.xlsx", products)
-    from openpyxl import load_workbook
-    book = load_workbook(path, read_only=True)
-    values = [row[0] for row in book.active.iter_rows(values_only=True)]
-    book.close()
-    assert values[1:] == products
 
 
 def test_extract_product_ids_filters_and_keeps_production_order(tmp_path: Path) -> None:
@@ -212,6 +254,10 @@ def test_multiple_aoi_families_are_downloaded_without_cross_product_requests(tmp
 
     assert backend.calls == [(d_products, ("DE",)), (e_products, ("EE",))]
     assert result.completed_item_count == 3
+    assert not list(result.output_dir.rglob("products.xlsx"))
+    runtime_log = (result.output_dir / "image_download_run.log").read_text(encoding="utf-8")
+    assert "直接填写DMC" in runtime_log
+    assert "temporary-secret" not in runtime_log
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["version"] == 2
     assert manifest["product_ids_by_family"] == {"D": list(d_products), "E": list(e_products)}
@@ -355,7 +401,7 @@ def test_product_limit_and_credentials_are_not_persisted(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="最多接受100"):
         backend.download_batch(
             [_product(index) for index in range(101)], ["DA"], "origin", True,
-            tmp_path / "template.xlsx", tmp_path, Event(),
+            tmp_path, Event(),
         )
 
 
@@ -374,6 +420,87 @@ def test_edge_options_use_dedicated_persistent_profile(tmp_path: Path) -> None:
     assert options.experimental_options["prefs"]["download.default_directory"] == str(
         download_dir.resolve()
     )
+
+
+def test_direct_entry_fills_newline_dmcs_and_verifies_site_count(tmp_path: Path) -> None:
+    messages: list[str] = []
+    clicked: list[str] = []
+    checked: list[tuple[str, bool]] = []
+    textarea = FakeTextArea()
+    backend = EdgeImageSiteBackend(tmp_path, log=messages.append, profile_dir=tmp_path / "profile")
+    backend.driver = FakeDirectDriver()
+    backend._By = type("FakeBy", (), {"CSS_SELECTOR": "css", "XPATH": "xpath"})
+    backend._page_ready = lambda: True
+    backend._click_xpath = lambda xpath, root=None: clicked.append(xpath)
+    backend._wait_visible = lambda by, selector, timeout=30: textarea
+    backend._set_checkbox = lambda label, value, root=None: checked.append((label, value))
+    products = (_product(1), _product(2))
+
+    backend._configure_direct_page(products, ("DA", "DE"), "origin", True)
+
+    assert textarea.value == "\n".join(products)
+    assert any("not(contains(.,'导入'))" in xpath for xpath in clicked)
+    assert any("只选择原图" in xpath for xpath in clicked)
+    assert ("DA", True) in checked and ("DE", True) in checked
+    assert ("EA", False) in checked and ("去除7层返工站", True) in checked
+    assert any("new Event('input'" in script for script, _element in backend.driver.scripts)
+    assert any("提交2个，网站识别2个" in message for message in messages)
+    assert all("token=secret" not in message for message in messages)
+
+
+def test_direct_entry_rejects_recognized_count_mismatch(tmp_path: Path, monkeypatch) -> None:
+    backend = EdgeImageSiteBackend(tmp_path, profile_dir=tmp_path / "profile")
+    backend.driver = FakeDirectDriver("一共识别 1 个产品号")
+    backend._By = type("FakeBy", (), {"XPATH": "xpath"})
+    ticks = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr("src.image_site_automation.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("src.image_site_automation.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="DMC解析数量不一致：提交2个，网站识别1个"):
+        backend._wait_recognized_count(2, timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("missing_control", "expected_message"),
+    (("tab", "未找到直接输入页签"), ("textarea", "未找到可见的产品号文本框")),
+)
+def test_direct_entry_reports_unavailable_controls(
+    tmp_path: Path, missing_control: str, expected_message: str,
+) -> None:
+    backend = EdgeImageSiteBackend(tmp_path, profile_dir=tmp_path / "profile")
+    backend.driver = FakeDirectDriver()
+    backend._By = type("FakeBy", (), {"CSS_SELECTOR": "css", "XPATH": "xpath"})
+    backend._page_ready = lambda: True
+    if missing_control == "tab":
+        backend._click_xpath = lambda _xpath: (_ for _ in ()).throw(TimeoutError("missing"))
+    else:
+        backend._click_xpath = lambda _xpath: None
+        backend._wait_visible = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            TimeoutError("missing")
+        )
+
+    with pytest.raises(RuntimeError, match=expected_message):
+        backend._configure_direct_page((_product(1),), ("DA",), "origin", True)
+
+
+def test_only_semantic_error_dialogs_abort_download(tmp_path: Path) -> None:
+    backend = EdgeImageSiteBackend(tmp_path, profile_dir=tmp_path / "profile")
+    driver = FakeDirectDriver()
+    backend.driver = driver
+    backend._By = type("FakeBy", (), {"CSS_SELECTOR": "css", "XPATH": "xpath"})
+    backend._find_first = lambda _selectors: None
+    neutral = FakeDialog("文件正在生成，请稍候")
+    driver.dialogs = [neutral]
+
+    assert backend._website_error_text() == ""
+    backend._confirm_neutral_dialog()
+    assert neutral.button.clicked
+
+    driver.dialogs = [FakeDialog("下载过程中发生错误，请重试")]
+    assert backend._website_error_text() == "下载过程中发生错误，请重试"
+
+    backend._find_first = lambda _selectors: FakeDisplayedText("服务器处理失败")
+    assert backend._website_error_text() == "服务器处理失败"
 
 
 def test_default_edge_profile_is_stable_and_application_owned(tmp_path: Path, monkeypatch) -> None:

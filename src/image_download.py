@@ -122,7 +122,6 @@ class ImageSiteBackend(Protocol):
         image_codes: Sequence[str],
         quality: str,
         skip_rework: bool,
-        template_path: Path,
         download_dir: Path,
         stop_event: Event,
     ) -> Path:
@@ -287,20 +286,6 @@ def extract_product_ids(workbook_path: Path) -> ProductIdSummary:
     )
 
 
-def create_product_template(path: Path, product_ids: Sequence[str]) -> Path:
-    """生成图片网站可读取的Sheet1产品号模板。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Sheet1"
-    sheet.append(["第一行无效，产品编号从第二行开始"])
-    for product_id in product_ids:
-        sheet.append([product_id])
-    workbook.save(path)
-    workbook.close()
-    return path
-
-
 def _safe_member_name(name: str) -> str:
     normalized = name.replace("\\", "/")
     if normalized.startswith("/") or ".." in Path(normalized).parts:
@@ -414,7 +399,7 @@ class ImageDownloadOrchestrator:
         self.request = request
         self.backend = backend
         self.stop_event = stop_event or Event()
-        self.log = log or (lambda _message: None)
+        self._external_log = log or (lambda _message: None)
         self.progress = progress or (lambda _value, _message: None)
         self.issues: list[ImageDownloadIssue] = []
         self.completed_items: set[tuple[str, str]] = set()
@@ -426,6 +411,18 @@ class ImageDownloadOrchestrator:
         self._products_by_family: dict[str, tuple[str, ...]] = {}
         self._sources_by_family: dict[str, str] = {}
         self._planned_items: set[tuple[str, str]] = set()
+        self.runtime_log_path = self.output_dir / "image_download_run.log"
+        self.log = self._log
+
+    def _log(self, message: str) -> None:
+        self._external_log(message)
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            with self.runtime_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{timestamp} | {message}\n")
+        except OSError:
+            pass
 
     def _check_cancelled(self) -> None:
         if self.stop_event.is_set():
@@ -476,14 +473,13 @@ class ImageDownloadOrchestrator:
         label = f"batch_{self._operation_index:04d}"
         batch_dir = self.temp_dir / label
         batch_dir.mkdir(parents=True, exist_ok=True)
-        template = create_product_template(batch_dir / "products.xlsx", product_ids)
         self.log(
-            f"{label}：{len(product_ids)}个产品，代码 {'+'.join(image_codes)}"
+            f"{label}：直接填写DMC，{len(product_ids)}个产品，代码 {'+'.join(image_codes)}"
             + (f"，第{retry_count}次重试" if retry_count else "")
         )
         return self.backend.download_batch(
             product_ids, image_codes, self.request.quality, self.request.skip_rework,
-            template, batch_dir, self.stop_event,
+            batch_dir, self.stop_event,
         )
 
     def _download_or_isolate(

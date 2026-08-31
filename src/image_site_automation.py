@@ -5,9 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Event
 from typing import Callable, Sequence
+import re
 import shutil
 import sys
 import time
+from urllib.parse import urlsplit
 
 from src.app_runtime import user_data_dir
 
@@ -17,7 +19,7 @@ EDGE_PROFILE_DIRNAME = "edge-image-profile"
 
 
 class EdgeImageSiteBackend:
-    """通过真实网页完成认证、Excel上传、选项配置和ZIP下载。"""
+    """通过真实网页完成认证、DMC填写、选项配置和ZIP下载。"""
 
     def __init__(
         self,
@@ -40,6 +42,7 @@ class EdgeImageSiteBackend:
         self._By = None
         self._WebDriverWait = None
         self._TimeoutException = None
+        self._active_download_pane = None
 
     def _load_selenium(self):
         try:
@@ -110,9 +113,13 @@ class EdgeImageSiteBackend:
         self._complete_login()
 
     def _find_first(self, selectors: Sequence[tuple[str, str]]):
+        return self._find_first_within(self.driver, selectors)
+
+    @staticmethod
+    def _find_first_within(root, selectors: Sequence[tuple[str, str]]):
         for by, value in selectors:
             try:
-                elements = self.driver.find_elements(by, value)
+                elements = root.find_elements(by, value)
                 match = next((item for item in elements if item.is_displayed()), None)
                 if match is not None:
                     return match
@@ -133,6 +140,15 @@ class EdgeImageSiteBackend:
             return str(self.driver.current_url or "")
         except Exception:
             return ""
+
+    def _safe_current_url(self) -> str:
+        """返回不含查询参数和认证片段的当前地址，供任务日志诊断。"""
+        current = self._current_url()
+        try:
+            parsed = urlsplit(current)
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}" if parsed.netloc else current
+        except Exception:
+            return current
 
     @staticmethod
     def _is_wia_url(url: str) -> bool:
@@ -207,10 +223,10 @@ class EdgeImageSiteBackend:
         except Exception as exc:
             raise RuntimeError(f"无法设置Edge下载目录：{exc}") from exc
 
-    def _wait_visible(self, by: str, selector: str, timeout: int = 30):
+    def _wait_visible(self, by: str, selector: str, timeout: int = 30, root=None):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            element = self._find_first(((by, selector),))
+            element = self._find_first_within(root or self.driver, ((by, selector),))
             if element is not None:
                 return element
             time.sleep(0.25)
@@ -228,59 +244,145 @@ class EdgeImageSiteBackend:
             time.sleep(0.25)
         raise TimeoutError(f"网页控件不存在：{selector}")
 
-    def _click_xpath(self, xpath: str) -> None:
-        element = self._wait_visible(self._By.XPATH, xpath)
+    def _click_xpath(self, xpath: str, root=None) -> None:
+        element = self._wait_visible(self._By.XPATH, xpath, root=root)
         self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
         try:
             element.click()
         except Exception:
             self.driver.execute_script("arguments[0].click();", element)
 
-    def _set_checkbox(self, label: str, checked: bool, container: str) -> None:
+    def _set_checkbox(self, label: str, checked: bool, root=None) -> None:
         xpath = (
-            f"//div[contains(@class,'{container}')]//label[contains(@class,'el-checkbox')]"
+            "//label[contains(@class,'el-checkbox')]"
             f"[.//span[contains(@class,'el-checkbox__label') and normalize-space(.)='{label}']]"
         )
-        element = self._wait_visible(self._By.XPATH, xpath)
+        element = self._wait_visible(self._By.XPATH, xpath, root=root)
         current = "is-checked" in (element.get_attribute("class") or "")
         if current != checked:
             self.driver.execute_script("arguments[0].click();", element)
 
-    def _configure_import_page(
-        self, template_path: Path, image_codes: Sequence[str], quality: str, skip_rework: bool,
+    @staticmethod
+    def _recognized_count(text: str) -> int | None:
+        match = re.search(r"(?:一共|共)\D{0,12}(\d+)\s*(?:个|条)?", text or "")
+        return int(match.group(1)) if match else None
+
+    def _wait_recognized_count(self, expected: int, timeout: int = 30) -> int:
+        deadline = time.monotonic() + timeout
+        last_count: int | None = None
+        while time.monotonic() < deadline:
+            try:
+                elements = self.driver.find_elements(
+                    self._By.XPATH,
+                    "//*[(contains(normalize-space(.),'一共') or starts-with(normalize-space(.),'共'))"
+                    " and string-length(normalize-space(.)) < 120]",
+                )
+                for element in elements:
+                    if not element.is_displayed():
+                        continue
+                    count = self._recognized_count(element.text)
+                    if count is not None:
+                        last_count = count
+                        if count == expected:
+                            return count
+            except Exception:
+                pass
+            time.sleep(0.25)
+        if last_count is not None:
+            raise RuntimeError(f"DMC解析数量不一致：提交{expected}个，网站识别{last_count}个")
+        raise TimeoutError(f"网站未显示DMC识别数量；本批提交{expected}个")
+
+    def _configure_direct_page(
+        self, product_ids: Sequence[str], image_codes: Sequence[str], quality: str, skip_rework: bool,
     ) -> None:
         self.driver.get(SITE_URL)
         if not self._page_ready():
             self._complete_login()
-        self._click_xpath(
-            "//div[contains(@class,'batch-download-tabs')]//div[contains(@class,'el-tabs__item')]"
-            "[contains(.,'导入产品号列表批量下载')]"
-        )
-        upload = self._wait_present(
-            self._By.CSS_SELECTOR,
-            ".import-execl-for-download-excel input[type=file]",
-        )
+        try:
+            self._click_xpath(
+                "//div[contains(@class,'batch-download-tabs')]//div[contains(@class,'el-tabs__item')]"
+                "[(contains(.,'产品号') or contains(.,'DMC') or contains(.,'批量'))"
+                " and not(contains(.,'导入')) and not(contains(.,'Excel'))]"
+            )
+        except TimeoutError as exc:
+            raise RuntimeError("网站直接填写DMC入口不可用：未找到直接输入页签") from exc
+        try:
+            textarea = self._wait_visible(
+                self._By.CSS_SELECTOR,
+                ".batch-download-main textarea, .el-tabs__content textarea, textarea",
+            )
+        except TimeoutError as exc:
+            raise RuntimeError("网站直接填写DMC入口不可用：未找到可见的产品号文本框") from exc
+        pane = self.driver.execute_script(
+            "return arguments[0].closest('.el-tab-pane') || "
+            "arguments[0].closest('.batch-download-main');",
+            textarea,
+        ) or self.driver
+        self._active_download_pane = pane
+        payload = "\n".join(product_ids)
+        textarea.clear()
+        textarea.send_keys(payload)
         self.driver.execute_script(
-            "arguments[0].style.display='block'; arguments[0].style.visibility='visible';", upload,
+            "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
+            "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));"
+            "arguments[0].blur();",
+            textarea,
         )
-        upload.send_keys(str(template_path.resolve()))
-        self._wait_visible(
-            self._By.XPATH,
-            "//div[contains(@class,'import-execl-for-download-options')]//*[contains(.,'一共')]",
-            timeout=30,
+        recognized = self._wait_recognized_count(len(product_ids))
+        self.log(
+            f"直接填写DMC：提交{len(product_ids)}个，网站识别{recognized}个；"
+            f"页面 {self._safe_current_url()}"
         )
         selected = set(image_codes)
         for code in (
             "DA", "DB", "DC", "DE", "DX", "DY", "EA", "EB", "EC", "EE", "EX", "EY",
             "FA", "FB", "FC", "FE", "FX", "FY", "GA", "GB", "GC", "GE", "GX", "GY",
         ):
-            self._set_checkbox(code, code in selected, "import-execl-for-download-options")
-        self._set_checkbox("去除7层返工站", skip_rework, "import-execl-for-download-options")
+            self._set_checkbox(code, code in selected, root=pane)
+        self._set_checkbox("去除7层返工站", skip_rework, root=pane)
         quality_label = "只选择原图" if quality == "origin" else "只选择压缩图"
         self._click_xpath(
-            "//div[contains(@class,'import-execl-for-download-options')]"
-            f"//label[contains(@class,'el-radio')][.//span[contains(.,'{quality_label}')]]"
+            f".//label[contains(@class,'el-radio')][.//span[contains(.,'{quality_label}')]]",
+            root=pane,
         )
+
+    @staticmethod
+    def _is_error_message(text: str) -> bool:
+        normalized = (text or "").strip().lower()
+        return any(token in normalized for token in (
+            "错误", "失败", "请重试", "异常", "error", "failed", "failure",
+        ))
+
+    def _website_error_text(self) -> str:
+        error = self._find_first(((self._By.CSS_SELECTOR, ".el-message--error"),))
+        if error is not None:
+            return error.text.strip() or "网站报告下载错误"
+        try:
+            dialogs = self.driver.find_elements(self._By.CSS_SELECTOR, ".el-message-box")
+            for dialog in dialogs:
+                if dialog.is_displayed() and self._is_error_message(dialog.text):
+                    return dialog.text.strip()
+        except Exception:
+            pass
+        return ""
+
+    def _confirm_neutral_dialog(self) -> None:
+        try:
+            dialogs = self.driver.find_elements(self._By.CSS_SELECTOR, ".el-message-box")
+            for dialog in dialogs:
+                if not dialog.is_displayed() or self._is_error_message(dialog.text):
+                    continue
+                buttons = dialog.find_elements(
+                    self._By.XPATH,
+                    ".//button[contains(@class,'el-button--primary')]"
+                    "[contains(.,'确定') or contains(.,'继续') or contains(.,'下载')]",
+                )
+                button = next((item for item in buttons if item.is_displayed()), None)
+                if button is not None:
+                    button.click()
+                    return
+        except Exception:
+            pass
 
     def _wait_for_zip(self, download_dir: Path, before: set[Path], stop_event: Event) -> Path:
         deadline = time.monotonic() + self.download_wait_seconds
@@ -289,10 +391,11 @@ class EdgeImageSiteBackend:
         while time.monotonic() < deadline:
             if stop_event.is_set():
                 raise InterruptedError("图片下载已取消")
-            error = self._find_first(((self._By.CSS_SELECTOR, ".el-message--error, .el-message-box"),))
-            if error is not None:
-                text = error.text.strip() or "网站报告下载错误"
-                raise RuntimeError(text)
+            error_text = self._website_error_text()
+            if error_text:
+                self.log(f"网站下载错误：{error_text}；页面 {self._safe_current_url()}")
+                raise RuntimeError(error_text)
+            self._confirm_neutral_dialog()
             partials = list(download_dir.glob("*.crdownload"))
             candidates = [
                 path for path in download_dir.glob("*.zip")
@@ -304,8 +407,10 @@ class EdgeImageSiteBackend:
                 stable_polls = stable_polls + 1 if size == stable_size else 0
                 stable_size = size
                 if size > 0 and stable_polls >= 2:
+                    self.log(f"ZIP下载完成：{newest.name}（{size} bytes）")
                     return newest
             time.sleep(1)
+        self.log(f"等待ZIP下载超时：页面 {self._safe_current_url()}；未检测到完整ZIP")
         raise TimeoutError("等待网站ZIP下载完成超时")
 
     def download_batch(
@@ -314,7 +419,6 @@ class EdgeImageSiteBackend:
         image_codes: Sequence[str],
         quality: str,
         skip_rework: bool,
-        template_path: Path,
         download_dir: Path,
         stop_event: Event,
     ) -> Path:
@@ -323,10 +427,10 @@ class EdgeImageSiteBackend:
         self.start(download_dir)
         self._set_download_directory(download_dir)
         before = {path.resolve() for path in download_dir.glob("*.zip")}
-        self._configure_import_page(template_path, image_codes, quality, skip_rework)
+        self._configure_direct_page(product_ids, image_codes, quality, skip_rework)
         self._click_xpath(
-            "//div[contains(@class,'import-execl-for-download-options')]"
-            "//button[contains(@class,'el-button--primary') and contains(.,'开始下载')]"
+            ".//button[contains(@class,'el-button--primary') and contains(.,'开始下载')]",
+            root=self._active_download_pane,
         )
         return self._wait_for_zip(download_dir, before, stop_event)
 

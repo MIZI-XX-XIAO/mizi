@@ -30,7 +30,7 @@ class _ImageDialogHeader(QFrame):
         badge.setObjectName("imageDialogBadge")
         title = QLabel("从公司网站下载检测图片")
         title.setObjectName("imageDialogTitle")
-        subtitle = QLabel("读取 MES 产品号，自动分批下载并隔离缺图或坏图")
+        subtitle = QLabel("读取MES产品号，直接填写DMC分批下载并隔离缺图或坏图")
         subtitle.setObjectName("imageDialogSubtitle")
         text = QVBoxLayout(); text.setContentsMargins(0, 0, 0, 0); text.setSpacing(2)
         text.addWidget(title); text.addWidget(subtitle)
