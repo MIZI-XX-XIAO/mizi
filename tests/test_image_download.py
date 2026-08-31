@@ -471,8 +471,13 @@ def test_direct_entry_fills_newline_dmcs_and_verifies_site_count(tmp_path: Path)
     backend._wait_recognized_count = lambda expected, timeout=30: (
         stages.append("recognized") or original_wait_count(expected, timeout)
     )
-    backend._wait_and_click_next = lambda root, timeout=30: stages.append("next")
-    backend._wait_options_pane = lambda timeout=30: stages.append("options") or backend.driver
+    backend._wait_and_click_next = lambda root, timeout=30, stage="DMC输入": stages.append(
+        f"next:{stage}"
+    )
+    backend._wait_code_options_pane = lambda timeout=30: stages.append("codes") or backend.driver
+    backend._wait_download_options_pane = lambda timeout=30: (
+        stages.append("download") or backend.driver
+    )
     products = (_product(1), _product(2))
 
     backend._configure_direct_page(products, ("DA", "DE"), "origin", True)
@@ -481,10 +486,11 @@ def test_direct_entry_fills_newline_dmcs_and_verifies_site_count(tmp_path: Path)
     assert any("not(contains(.,'导入'))" in xpath for xpath in clicked)
     assert any("只选择原图" in xpath for xpath in clicked)
     assert ("DA", True) in checked and ("DE", True) in checked
-    assert ("EA", False) in checked and ("去除7层返工站", True) in checked
+    assert ("EA", False) in checked
+    assert any("未提供“去除7层返工站”选项" in message for message in messages)
     assert any("new Event('input'" in script for script, _element in backend.driver.scripts)
     assert any("提交2个，网站识别2个" in message for message in messages)
-    assert stages == ["next", "recognized", "options"]
+    assert stages == ["next:DMC输入", "recognized", "codes", "next:图片代码", "download"]
     assert any("DMC填写完成" in message for message in messages)
     assert any("已进入产品验证步骤" in message for message in messages)
     assert all("token=secret" not in message for message in messages)
@@ -498,15 +504,25 @@ def test_direct_entry_rejects_recognized_count_mismatch(tmp_path: Path, monkeypa
     backend._click_xpath = lambda _xpath: None
     backend._wait_visible = lambda *_args, **_kwargs: FakeTextArea()
     stages: list[str] = []
-    backend._wait_and_click_next = lambda root, timeout=30: stages.append("next")
-    backend._wait_options_pane = lambda timeout=30: stages.append("options") or backend.driver
+    backend._wait_and_click_next = lambda root, timeout=30, stage="DMC输入": stages.append(
+        f"next:{stage}"
+    )
+    backend._wait_code_options_pane = lambda timeout=30: stages.append("codes") or backend.driver
+    backend._wait_download_options_pane = lambda timeout=30: (
+        stages.append("download") or backend.driver
+    )
     ticks = iter((0.0, 0.0, 31.0))
     monkeypatch.setattr("src.image_site_automation.time.monotonic", lambda: next(ticks))
     monkeypatch.setattr("src.image_site_automation.time.sleep", lambda _seconds: None)
 
     with pytest.raises(RuntimeError, match="DMC解析数量不一致：提交2个，网站识别1个"):
         backend._configure_direct_page((_product(1), _product(2)), ("DA",), "origin", True)
-    assert stages == ["next"]
+    assert stages == ["next:DMC输入"]
+
+
+def test_recognized_count_accepts_manual_download_validation_text() -> None:
+    text = "一共需要处理的有效产品编号有 10 个，请在下面选择需要的产品数据类型"
+    assert EdgeImageSiteBackend._recognized_count(text) == 10
 
 
 @pytest.mark.parametrize(
@@ -547,7 +563,7 @@ def test_next_button_waits_until_enabled_then_clicks(tmp_path: Path, monkeypatch
 
     assert button.clicked
     assert any("下一步按钮已可用" in message for message in messages)
-    assert any("已点击下一步" in message for message in messages)
+    assert any("已点击DMC输入步骤的下一步" in message for message in messages)
 
 
 @pytest.mark.parametrize(
@@ -583,11 +599,10 @@ def test_next_button_click_failure_is_explicit(tmp_path: Path) -> None:
         backend._wait_and_click_next(FakeElementRoot([button]))
 
 
-def test_options_pane_is_reacquired_after_next_step(tmp_path: Path) -> None:
+def test_code_options_pane_is_reacquired_after_first_next_step(tmp_path: Path) -> None:
     messages: list[str] = []
     code_label = FakeDisplayedText("DA")
-    quality = FakeDisplayedText("只选择原图")
-    new_pane = FakeOptionsPane([quality])
+    new_pane = FakeOptionsPane()
     driver = FakeDirectDriver()
     backend = EdgeImageSiteBackend(tmp_path, log=messages.append, profile_dir=tmp_path / "profile")
     backend.driver = driver
@@ -601,11 +616,36 @@ def test_options_pane_is_reacquired_after_next_step(tmp_path: Path) -> None:
         new_pane if "closest('.el-tab-pane')" in script else original_execute(script, element)
     )
 
-    result = backend._wait_options_pane()
+    result = backend._wait_code_options_pane()
 
     assert result is new_pane
     assert backend._active_download_pane is new_pane
-    assert any("图片选项页加载完成" in message for message in messages)
+    assert any("产品验证与图片代码页加载完成" in message for message in messages)
+
+
+def test_download_options_pane_is_reacquired_after_second_next_step(tmp_path: Path) -> None:
+    messages: list[str] = []
+    action = FakeDisplayedText("了解上述提示后，点击开始下载数据")
+    quality = FakeDisplayedText("只选择原图")
+    final_pane = FakeOptionsPane([quality])
+    driver = FakeDirectDriver()
+    backend = EdgeImageSiteBackend(tmp_path, log=messages.append, profile_dir=tmp_path / "profile")
+    backend.driver = driver
+    backend._By = type("FakeBy", (), {"CSS_SELECTOR": "css", "XPATH": "xpath"})
+    backend._find_first = lambda selectors: (
+        action if "开始下载数据" in selectors[0][1] else None
+    )
+    backend._confirm_neutral_dialog = lambda: None
+    original_execute = driver.execute_script
+    driver.execute_script = lambda script, element=None: (
+        final_pane if "closest('.el-tab-pane')" in script else original_execute(script, element)
+    )
+
+    result = backend._wait_download_options_pane()
+
+    assert result is final_pane
+    assert backend._active_download_pane is final_pane
+    assert any("下载设置页加载完成" in message for message in messages)
 
 
 def test_only_semantic_error_dialogs_abort_download(tmp_path: Path) -> None:

@@ -264,12 +264,37 @@ class EdgeImageSiteBackend:
         element = self._wait_visible(self._By.XPATH, xpath, root=root)
         current = "is-checked" in (element.get_attribute("class") or "")
         if current != checked:
+            if not self._element_enabled(element):
+                raise RuntimeError(f"网站当前不允许选择图片选项：{label}")
             self.driver.execute_script("arguments[0].click();", element)
+
+    def _set_optional_checkbox(self, label: str, checked: bool, root=None) -> bool:
+        xpath = (
+            ".//label[contains(@class,'el-checkbox')]"
+            f"[.//span[contains(@class,'el-checkbox__label') and normalize-space(.)='{label}']]"
+        )
+        element = self._find_first_within(root or self.driver, ((self._By.XPATH, xpath),))
+        if element is None:
+            return False
+        current = "is-checked" in (element.get_attribute("class") or "")
+        if current != checked:
+            if not self._element_enabled(element):
+                raise RuntimeError(f"网站当前不允许设置选项：{label}")
+            element.click()
+        return True
 
     @staticmethod
     def _recognized_count(text: str) -> int | None:
-        match = re.search(r"(?:一共|共)\D{0,12}(\d+)\s*(?:个|条)?", text or "")
-        return int(match.group(1)) if match else None
+        normalized = " ".join((text or "").split())
+        patterns = (
+            r"(?:一共|共)\D{0,40}(\d+)\s*(?:个|条)",
+            r"有效产品(?:编号|号)\D{0,20}(\d+)\s*(?:个|条)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if match:
+                return int(match.group(1))
+        return None
 
     def _wait_recognized_count(self, expected: int, timeout: int = 30) -> int:
         deadline = time.monotonic() + timeout
@@ -282,12 +307,12 @@ class EdgeImageSiteBackend:
             try:
                 elements = self.driver.find_elements(
                     self._By.XPATH,
-                    "//*[(contains(normalize-space(.),'一共') or starts-with(normalize-space(.),'共'))"
-                    " and string-length(normalize-space(.)) < 120]",
+                    "//*[contains(normalize-space(.),'有效产品编号') or "
+                    "contains(normalize-space(.),'有效产品号') or "
+                    "contains(normalize-space(.),'一共') or starts-with(normalize-space(.),'共')]",
                 )
-                for element in elements:
-                    if not element.is_displayed():
-                        continue
+                visible = [element for element in elements if element.is_displayed()]
+                for element in sorted(visible, key=lambda item: len(item.text or "")):
                     count = self._recognized_count(element.text)
                     if count is not None:
                         last_count = count
@@ -315,7 +340,7 @@ class EdgeImageSiteBackend:
         except AttributeError:
             return True
 
-    def _wait_and_click_next(self, root, timeout: int = 30) -> None:
+    def _wait_and_click_next(self, root, timeout: int = 30, stage: str = "DMC输入") -> None:
         """在DMC输入步骤内等待并点击已启用的下一步按钮。"""
         deadline = time.monotonic() + timeout
         button_seen = False
@@ -326,7 +351,7 @@ class EdgeImageSiteBackend:
         while time.monotonic() < deadline:
             error_text = self._website_error_text()
             if error_text:
-                self.log(f"DMC识别后网站报错：{error_text}；页面 {self._safe_current_url()}")
+                self.log(f"{stage}步骤网站报错：{error_text}；页面 {self._safe_current_url()}")
                 raise RuntimeError(error_text)
             button = self._find_first_within(root, ((self._By.XPATH, xpath),))
             if button is None:
@@ -336,7 +361,7 @@ class EdgeImageSiteBackend:
             if not self._element_enabled(button):
                 time.sleep(0.25)
                 continue
-            self.log(f"下一步按钮已可用；页面 {self._safe_current_url()}")
+            self.log(f"{stage}步骤的下一步按钮已可用；页面 {self._safe_current_url()}")
             try:
                 self.driver.execute_script(
                     "arguments[0].scrollIntoView({block:'center'});", button,
@@ -344,14 +369,14 @@ class EdgeImageSiteBackend:
                 button.click()
             except Exception as exc:
                 raise RuntimeError(f"点击下一步失败：{exc}") from exc
-            self.log(f"已点击下一步；页面 {self._safe_current_url()}")
+            self.log(f"已点击{stage}步骤的下一步；页面 {self._safe_current_url()}")
             return
         if button_seen:
-            raise RuntimeError(f"网站的下一步按钮在{timeout}秒内一直不可用")
-        raise RuntimeError("网站直接填写DMC页面未找到下一步按钮")
+            raise RuntimeError(f"网站{stage}步骤的下一步按钮在{timeout}秒内一直不可用")
+        raise RuntimeError(f"网站{stage}步骤未找到下一步按钮")
 
-    def _wait_options_pane(self, timeout: int = 30):
-        """下一步可能重绘DOM，因此通过第二步控件重新取得活动区域。"""
+    def _wait_code_options_pane(self, timeout: int = 30):
+        """通过图片代码复选框重新取得第二步活动区域。"""
         deadline = time.monotonic() + timeout
         code_terms = " or ".join(
             f"normalize-space(.)='{code}'" for code in SITE_IMAGE_CODES
@@ -359,10 +384,6 @@ class EdgeImageSiteBackend:
         code_xpath = (
             "//label[contains(@class,'el-checkbox')]"
             f"[.//span[contains(@class,'el-checkbox__label') and ({code_terms})]]"
-        )
-        quality_xpath = (
-            ".//label[contains(@class,'el-radio')]"
-            "[.//span[contains(.,'只选择原图') or contains(.,'只选择压缩图')]]"
         )
         while time.monotonic() < deadline:
             error_text = self._website_error_text()
@@ -377,14 +398,46 @@ class EdgeImageSiteBackend:
                     "arguments[0].closest('.batch-download-main');",
                     code_label,
                 ) or self.driver
+                self._active_download_pane = pane
+                self.log(f"产品验证与图片代码页加载完成；页面 {self._safe_current_url()}")
+                return pane
+            time.sleep(0.25)
+        raise TimeoutError(
+            f"点击第一个下一步后，图片代码选项在{timeout}秒内未出现"
+        )
+
+    def _wait_download_options_pane(self, timeout: int = 30):
+        """等待第三步的质量选项和真正下载按钮。"""
+        deadline = time.monotonic() + timeout
+        action_xpath = (
+            "//button[contains(normalize-space(.),'开始下载数据') or "
+            "contains(normalize-space(.),'了解上述提示')]"
+        )
+        quality_xpath = (
+            ".//label[contains(@class,'el-radio')]"
+            "[.//span[contains(.,'只选择原图') or contains(.,'只选择压缩图')]]"
+        )
+        while time.monotonic() < deadline:
+            error_text = self._website_error_text()
+            if error_text:
+                self.log(f"进入下载设置时网站报错：{error_text}；页面 {self._safe_current_url()}")
+                raise RuntimeError(error_text)
+            self._confirm_neutral_dialog()
+            action = self._find_first(((self._By.XPATH, action_xpath),))
+            if action is not None:
+                pane = self.driver.execute_script(
+                    "return arguments[0].closest('.el-tab-pane') || "
+                    "arguments[0].closest('.batch-download-main');",
+                    action,
+                ) or self.driver
                 quality = self._find_first_within(pane, ((self._By.XPATH, quality_xpath),))
                 if quality is not None:
                     self._active_download_pane = pane
-                    self.log(f"图片选项页加载完成；页面 {self._safe_current_url()}")
+                    self.log(f"下载设置页加载完成；页面 {self._safe_current_url()}")
                     return pane
             time.sleep(0.25)
         raise TimeoutError(
-            f"点击下一步后，图片代码和质量选项在{timeout}秒内未出现"
+            f"点击第二个下一步后，下载设置在{timeout}秒内未出现"
         )
 
     def _configure_direct_page(
@@ -423,20 +476,24 @@ class EdgeImageSiteBackend:
             "arguments[0].blur();",
             textarea,
         )
-        self.log("DMC填写完成，正在点击下一步")
-        self._wait_and_click_next(pane)
+        self.log("DMC填写完成，正在点击第一个下一步")
+        self._wait_and_click_next(pane, stage="DMC输入")
         self.log("已进入产品验证步骤，正在核对网站识别数量")
         recognized = self._wait_recognized_count(len(product_ids))
         self.log(
             f"直接填写DMC：提交{len(product_ids)}个，网站识别{recognized}个；"
             f"页面 {self._safe_current_url()}"
         )
-        self.log("DMC识别数量一致，正在加载图片选项")
-        pane = self._wait_options_pane()
+        self.log("DMC识别数量一致，正在配置图片代码")
+        pane = self._wait_code_options_pane()
         selected = set(image_codes)
         for code in SITE_IMAGE_CODES:
             self._set_checkbox(code, code in selected, root=pane)
-        self._set_checkbox("去除7层返工站", skip_rework, root=pane)
+        if not self._set_optional_checkbox("去除7层返工站", skip_rework, root=pane):
+            self.log("网站直接下载页未提供“去除7层返工站”选项，按网站当前规则处理")
+        self.log("图片代码已配置，正在点击第二个下一步")
+        self._wait_and_click_next(pane, stage="图片代码")
+        pane = self._wait_download_options_pane()
         quality_label = "只选择原图" if quality == "origin" else "只选择压缩图"
         self._click_xpath(
             f".//label[contains(@class,'el-radio')][.//span[contains(.,'{quality_label}')]]",
@@ -530,7 +587,9 @@ class EdgeImageSiteBackend:
             f"代码 {'+'.join(image_codes)}；页面 {self._safe_current_url()}"
         )
         self._click_xpath(
-            ".//button[contains(@class,'el-button--primary') and contains(.,'开始下载')]",
+            ".//button[contains(@class,'el-button--primary') and "
+            "(contains(.,'开始下载数据') or contains(.,'了解上述提示') or "
+            "normalize-space(.)='开始下载')]",
             root=self._active_download_pane,
         )
         return self._wait_for_zip(download_dir, before, stop_event)
