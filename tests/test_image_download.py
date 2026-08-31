@@ -107,6 +107,37 @@ class FakeOptionsPane(FakeElementRoot):
     pass
 
 
+class FakeCodeCheckbox(FakeLoginElement):
+    def __init__(self, code: str, checked: bool = False, enabled: bool = True) -> None:
+        super().__init__()
+        self.code = code
+        self.checked = checked
+        self.enabled = enabled
+
+    def is_enabled(self) -> bool:
+        return self.enabled
+
+    def get_attribute(self, name: str):
+        if name == "class":
+            return "el-checkbox is-checked" if self.checked else "el-checkbox"
+        return None
+
+    def click(self) -> None:
+        self.checked = not self.checked
+        self.clicked = True
+
+
+class FakeCodePane:
+    def __init__(self, checkboxes: dict[str, FakeCodeCheckbox]) -> None:
+        self.checkboxes = checkboxes
+
+    def find_elements(self, _by, selector: str):
+        for code, checkbox in self.checkboxes.items():
+            if f"normalize-space(.)='{code}'" in selector:
+                return [checkbox]
+        return []
+
+
 class FakeDirectDriver:
     def __init__(self, count_text: str = "一共 2 个产品号") -> None:
         self.current_url = "https://fuel-cell.apac.bosch.com/customize/download?token=secret"
@@ -119,6 +150,8 @@ class FakeDirectDriver:
 
     def execute_script(self, script: str, element=None) -> None:
         self.scripts.append((script, element))
+        if "arguments[0].click()" in script and element is not None:
+            element.click()
 
     def find_elements(self, _by, selector: str):
         if "一共" in selector:
@@ -457,7 +490,7 @@ def test_edge_options_use_dedicated_persistent_profile(tmp_path: Path) -> None:
 def test_direct_entry_fills_newline_dmcs_and_verifies_site_count(tmp_path: Path) -> None:
     messages: list[str] = []
     clicked: list[str] = []
-    checked: list[tuple[str, bool]] = []
+    configured_codes: list[str] = []
     textarea = FakeTextArea()
     backend = EdgeImageSiteBackend(tmp_path, log=messages.append, profile_dir=tmp_path / "profile")
     backend.driver = FakeDirectDriver()
@@ -465,7 +498,7 @@ def test_direct_entry_fills_newline_dmcs_and_verifies_site_count(tmp_path: Path)
     backend._page_ready = lambda: True
     backend._click_xpath = lambda xpath, root=None: clicked.append(xpath)
     backend._wait_visible = lambda by, selector, timeout=30: textarea
-    backend._set_checkbox = lambda label, value, root=None: checked.append((label, value))
+    backend._configure_visible_image_codes = lambda root, codes: configured_codes.extend(codes)
     stages: list[str] = []
     original_wait_count = backend._wait_recognized_count
     backend._wait_recognized_count = lambda expected, timeout=30: (
@@ -485,8 +518,7 @@ def test_direct_entry_fills_newline_dmcs_and_verifies_site_count(tmp_path: Path)
     assert textarea.value == "\n".join(products)
     assert any("not(contains(.,'导入'))" in xpath for xpath in clicked)
     assert any("只选择原图" in xpath for xpath in clicked)
-    assert ("DA", True) in checked and ("DE", True) in checked
-    assert ("EA", False) in checked
+    assert configured_codes == ["DA", "DE"]
     assert any("未提供“去除7层返工站”选项" in message for message in messages)
     assert any("new Event('input'" in script for script, _element in backend.driver.scripts)
     assert any("提交2个，网站识别2个" in message for message in messages)
@@ -523,6 +555,27 @@ def test_direct_entry_rejects_recognized_count_mismatch(tmp_path: Path, monkeypa
 def test_recognized_count_accepts_manual_download_validation_text() -> None:
     text = "一共需要处理的有效产品编号有 10 个，请在下面选择需要的产品数据类型"
     assert EdgeImageSiteBackend._recognized_count(text) == 10
+
+
+def test_visible_image_codes_clear_website_defaults_and_ignore_absent_codes(tmp_path: Path) -> None:
+    messages: list[str] = []
+    checkboxes = {
+        "DA": FakeCodeCheckbox("DA"),
+        "DE": FakeCodeCheckbox("DE"),
+        "EA": FakeCodeCheckbox("EA"),
+        "EE": FakeCodeCheckbox("EE", checked=True),
+    }
+    backend = EdgeImageSiteBackend(tmp_path, log=messages.append, profile_dir=tmp_path / "profile")
+    backend.driver = FakeDirectDriver()
+    backend._By = type("FakeBy", (), {"XPATH": "xpath"})
+
+    backend._configure_visible_image_codes(FakeCodePane(checkboxes), ("DA", "DE"))
+
+    assert checkboxes["DA"].checked
+    assert checkboxes["DE"].checked
+    assert not checkboxes["EA"].checked
+    assert not checkboxes["EE"].checked
+    assert any("仅选择 DA+DE" in message and "EE" in message for message in messages)
 
 
 @pytest.mark.parametrize(

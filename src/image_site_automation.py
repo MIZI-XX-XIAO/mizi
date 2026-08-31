@@ -283,6 +283,49 @@ class EdgeImageSiteBackend:
             element.click()
         return True
 
+    def _configure_visible_image_codes(self, root, selected_codes: Sequence[str]) -> None:
+        """仅操作直接下载页实际提供的代码，并清除网站默认勾选。"""
+        selected = {code.upper() for code in selected_codes}
+        elements_by_code: dict[str, object] = {}
+        for code in SITE_IMAGE_CODES:
+            xpath = (
+                ".//label[contains(@class,'el-checkbox')]"
+                f"[.//span[contains(@class,'el-checkbox__label') and normalize-space(.)='{code}']]"
+            )
+            element = self._find_first_within(root, ((self._By.XPATH, xpath),))
+            if element is not None:
+                elements_by_code[code] = element
+
+        missing = sorted(selected - elements_by_code.keys())
+        if missing:
+            raise RuntimeError(
+                f"网站当前页面不提供所选图片代码：{'+'.join(missing)}"
+            )
+
+        cleared: list[str] = []
+        for code, element in elements_by_code.items():
+            should_check = code in selected
+            is_checked = "is-checked" in (element.get_attribute("class") or "")
+            if is_checked == should_check:
+                continue
+            if not self._element_enabled(element):
+                raise RuntimeError(f"网站当前不允许更改图片选项：{code}")
+            self.driver.execute_script("arguments[0].click();", element)
+            if not should_check:
+                cleared.append(code)
+
+        mismatched: list[str] = []
+        for code, element in elements_by_code.items():
+            is_checked = "is-checked" in (element.get_attribute("class") or "")
+            if is_checked != (code in selected):
+                mismatched.append(code)
+        if mismatched:
+            raise RuntimeError(f"图片代码勾选状态未生效：{'+'.join(mismatched)}")
+        self.log(
+            f"图片代码已校准：仅选择 {'+'.join(sorted(selected))}"
+            + (f"；已取消网站默认勾选 {'+'.join(cleared)}" if cleared else "")
+        )
+
     @staticmethod
     def _recognized_count(text: str) -> int | None:
         normalized = " ".join((text or "").split())
@@ -486,9 +529,7 @@ class EdgeImageSiteBackend:
         )
         self.log("DMC识别数量一致，正在配置图片代码")
         pane = self._wait_code_options_pane()
-        selected = set(image_codes)
-        for code in SITE_IMAGE_CODES:
-            self._set_checkbox(code, code in selected, root=pane)
+        self._configure_visible_image_codes(pane, image_codes)
         if not self._set_optional_checkbox("去除7层返工站", skip_rework, root=pane):
             self.log("网站直接下载页未提供“去除7层返工站”选项，按网站当前规则处理")
         self.log("图片代码已配置，正在点击第二个下一步")
