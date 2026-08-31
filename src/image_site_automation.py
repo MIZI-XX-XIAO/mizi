@@ -275,6 +275,10 @@ class EdgeImageSiteBackend:
         deadline = time.monotonic() + timeout
         last_count: int | None = None
         while time.monotonic() < deadline:
+            error_text = self._website_error_text()
+            if error_text:
+                self.log(f"验证DMC时网站报错：{error_text}；页面 {self._safe_current_url()}")
+                raise RuntimeError(error_text)
             try:
                 elements = self.driver.find_elements(
                     self._By.XPATH,
@@ -419,13 +423,15 @@ class EdgeImageSiteBackend:
             "arguments[0].blur();",
             textarea,
         )
+        self.log("DMC填写完成，正在点击下一步")
+        self._wait_and_click_next(pane)
+        self.log("已进入产品验证步骤，正在核对网站识别数量")
         recognized = self._wait_recognized_count(len(product_ids))
         self.log(
             f"直接填写DMC：提交{len(product_ids)}个，网站识别{recognized}个；"
             f"页面 {self._safe_current_url()}"
         )
-        self.log("DMC识别完成，正在进入图片选项")
-        self._wait_and_click_next(pane)
+        self.log("DMC识别数量一致，正在加载图片选项")
         pane = self._wait_options_pane()
         selected = set(image_codes)
         for code in SITE_IMAGE_CODES:

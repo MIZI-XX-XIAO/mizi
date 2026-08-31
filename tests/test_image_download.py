@@ -484,21 +484,29 @@ def test_direct_entry_fills_newline_dmcs_and_verifies_site_count(tmp_path: Path)
     assert ("EA", False) in checked and ("去除7层返工站", True) in checked
     assert any("new Event('input'" in script for script, _element in backend.driver.scripts)
     assert any("提交2个，网站识别2个" in message for message in messages)
-    assert stages == ["recognized", "next", "options"]
-    assert any("DMC识别完成" in message for message in messages)
+    assert stages == ["next", "recognized", "options"]
+    assert any("DMC填写完成" in message for message in messages)
+    assert any("已进入产品验证步骤" in message for message in messages)
     assert all("token=secret" not in message for message in messages)
 
 
 def test_direct_entry_rejects_recognized_count_mismatch(tmp_path: Path, monkeypatch) -> None:
     backend = EdgeImageSiteBackend(tmp_path, profile_dir=tmp_path / "profile")
     backend.driver = FakeDirectDriver("一共识别 1 个产品号")
-    backend._By = type("FakeBy", (), {"XPATH": "xpath"})
-    ticks = iter((0.0, 0.0, 2.0))
+    backend._By = type("FakeBy", (), {"CSS_SELECTOR": "css", "XPATH": "xpath"})
+    backend._page_ready = lambda: True
+    backend._click_xpath = lambda _xpath: None
+    backend._wait_visible = lambda *_args, **_kwargs: FakeTextArea()
+    stages: list[str] = []
+    backend._wait_and_click_next = lambda root, timeout=30: stages.append("next")
+    backend._wait_options_pane = lambda timeout=30: stages.append("options") or backend.driver
+    ticks = iter((0.0, 0.0, 31.0))
     monkeypatch.setattr("src.image_site_automation.time.monotonic", lambda: next(ticks))
     monkeypatch.setattr("src.image_site_automation.time.sleep", lambda _seconds: None)
 
     with pytest.raises(RuntimeError, match="DMC解析数量不一致：提交2个，网站识别1个"):
-        backend._wait_recognized_count(2, timeout=1)
+        backend._configure_direct_page((_product(1), _product(2)), ("DA",), "origin", True)
+    assert stages == ["next"]
 
 
 @pytest.mark.parametrize(
