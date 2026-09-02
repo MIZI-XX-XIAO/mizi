@@ -154,7 +154,7 @@ QTabBar::tab {
 }
 QTabBar::tab:hover { color: #D8E5F4; background: #182B48; }
 QTabBar::tab:selected { color: #49B7E8; background: #111E33; border-top: 2px solid #289DDB; }
-QTableView, QListWidget, QTextEdit {
+QTableView, QTreeWidget, QListWidget, QTextEdit, QPlainTextEdit {
     color: #D9E3F0; background: #111E33; alternate-background-color: #162641;
     gridline-color: #253B5C; border: 1px solid #294164; border-radius: 5px;
     selection-color: white; selection-background-color: #245B85;
@@ -166,6 +166,7 @@ QHeaderView::section {
     padding: 4px 8px; font-weight: 600;
 }
 QListWidget::item { padding: 8px; border-bottom: 1px solid #203552; }
+QTreeWidget::item { min-height: 26px; padding: 2px 5px; }
 
 /* 进度、状态和提示 */
 QProgressBar {

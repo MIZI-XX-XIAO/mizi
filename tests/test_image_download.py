@@ -215,6 +215,18 @@ class OmitOnceBackend(FakeBackend):
         return archive
 
 
+class FixedArchiveNameBackend(FakeBackend):
+    def download_batch(self, product_ids, image_codes, quality, skip_rework, download_dir, stop_event):
+        products, codes = tuple(product_ids), tuple(image_codes)
+        self.calls.append((products, codes))
+        archive = download_dir / "download.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            for product in products:
+                for code in codes:
+                    bundle.writestr(f"{product}20260826{code}.tif", _tiff_bytes())
+        return archive
+
+
 def _request(tmp_path: Path, codes=("DA", "DE"), batch_size=80) -> ImageDownloadRequest:
     workbook = tmp_path / "source.xlsx"
     Workbook().save(workbook)
@@ -304,6 +316,20 @@ def test_82_products_are_split_into_80_and_2(tmp_path: Path) -> None:
     assert backend.closed
 
 
+def test_fixed_name_archives_are_uniquely_preserved_across_batches(tmp_path: Path) -> None:
+    products = tuple(_product(index) for index in range(85))
+    backend = FixedArchiveNameBackend()
+    result = ImageDownloadOrchestrator(_request(tmp_path), backend).run(ProductIdSummary(products, (), 0))
+
+    archives = sorted((result.output_dir / "archives").glob("*.zip"))
+    assert len(archives) == 2
+    assert len({archive.name for archive in archives}) == 2
+    assert [len(call[0]) for call in backend.calls] == [80, 5]
+    assert result.completed_item_count == 170
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert [item["status"] for item in manifest["archives"]] == ["processed", "processed"]
+
+
 def test_multiple_aoi_families_are_downloaded_without_cross_product_requests(tmp_path: Path) -> None:
     d_products = (_product(1), _product(2))
     e_products = (_product(3),)
@@ -324,11 +350,55 @@ def test_multiple_aoi_families_are_downloaded_without_cross_product_requests(tmp
     assert "直接填写DMC" in runtime_log
     assert "temporary-secret" not in runtime_log
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-    assert manifest["version"] == 2
+    assert manifest["version"] == 3
     assert manifest["product_ids_by_family"] == {"D": list(d_products), "E": list(e_products)}
     report = load_workbook(result.summary_path, read_only=True)
     assert "AOI Stations" in report.sheetnames
+    assert "Archives" in report.sheetnames
     report.close()
+
+
+def test_selected_products_are_filtered_and_validated_by_family(tmp_path: Path) -> None:
+    d_products = (_product(1), _product(2), _product(3))
+    e_products = (_product(4), _product(5))
+    summary = ProductIdSummary(
+        d_products + e_products, (), 0,
+        products_by_family={"D": d_products, "E": e_products, "F": (), "G": ()},
+    )
+    base = _request(tmp_path, codes=("DE", "EE"), batch_size=10)
+    request = ImageDownloadRequest(
+        base.workbook_path, base.output_root, base.image_codes, base.quality,
+        batch_size=10,
+        selected_products_by_family={"D": (d_products[1],), "E": (e_products[0],)},
+    )
+    backend = FakeBackend()
+
+    result = ImageDownloadOrchestrator(request, backend).run(summary)
+
+    assert backend.calls == [((d_products[1],), ("DE",)), ((e_products[0],), ("EE",))]
+    assert result.product_count == 2
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["product_ids_by_family"] == {"D": [d_products[1]], "E": [e_products[0]]}
+    assert manifest["available_counts_by_family"] == {"D": 3, "E": 2, "F": 0, "G": 0}
+
+
+def test_selected_product_from_wrong_family_is_rejected(tmp_path: Path) -> None:
+    d_product, e_product = _product(1), _product(2)
+    summary = ProductIdSummary(
+        (d_product, e_product), (), 0,
+        products_by_family={"D": (d_product,), "E": (e_product,), "F": (), "G": ()},
+    )
+    base = _request(tmp_path, codes=("DE",), batch_size=10)
+    request = ImageDownloadRequest(
+        base.workbook_path, base.output_root, base.image_codes, base.quality,
+        batch_size=10, selected_products_by_family={"D": (e_product,)},
+    )
+    backend = FakeBackend()
+
+    with pytest.raises(ValueError, match="非本AOI站"):
+        ImageDownloadOrchestrator(request, backend).run(summary)
+
+    assert backend.calls == []
 
 
 def test_selected_family_without_aoi_products_is_rejected_before_backend_call(tmp_path: Path) -> None:
@@ -400,6 +470,8 @@ def test_retry_manifest_only_downloads_failed_item(tmp_path: Path) -> None:
     first = ImageDownloadOrchestrator(
         _request(tmp_path, batch_size=10), FakeBackend(bad, "DE"),
     ).run(ProductIdSummary(products, (), 0))
+    first_manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
+    first_archives = {item["path"] for item in first_manifest["archives"]}
     retry_request = ImageDownloadRequest(
         first.manifest_path.parent.parent / "source.xlsx",
         first.output_dir, ("DA", "DE"), "origin", batch_size=10,
@@ -411,6 +483,10 @@ def test_retry_manifest_only_downloads_failed_item(tmp_path: Path) -> None:
     assert backend.calls == [((bad,), ("DE",))]
     assert retried.product_count == 4
     assert retried.completed_item_count == 8
+    retried_manifest = json.loads(retried.manifest_path.read_text(encoding="utf-8"))
+    retried_archives = {item["path"] for item in retried_manifest["archives"]}
+    assert first_archives < retried_archives
+    assert len(list((retried.output_dir / "archives").glob("*.zip"))) == len(retried_archives)
 
 
 def test_v1_retry_manifest_retries_exact_sparse_pairs(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QSize, Qt  # noqa: E402
 from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton  # noqa: E402
 
+from gui.image_download_dialog import ImageDownloadDialog, parse_pasted_product_ids  # noqa: E402
 from gui.main_window import MainWindow  # noqa: E402
 from gui.parameter_dialog import ParameterDialog  # noqa: E402
 from gui.workbench import LayoutProfile, WorkbenchStack, resolve_layout_profile  # noqa: E402
@@ -149,6 +150,8 @@ def test_image_download_dialog_reads_mes_products_and_uses_safe_defaults(qtbot, 
     assert dialog.login_hint.isVisible()
     assert "5S/MS03106" in dialog.product_stats.text()
     assert "工站匹配：MS0310all" in dialog.product_stats.text()
+    assert dialog.product_selection_count.text() == "已选 1 / 1"
+    assert dialog._selected_products_by_family()["D"] == (product,)
     dialog.code_checks["EE"].setChecked(True)
     dialog.origin_radio.setChecked(True)
     dialog._start()
@@ -216,6 +219,41 @@ def test_all_result_cards_open_embedded_details_and_return_to_overview(qtbot) ->
     assert model.data(index, Qt.ForegroundRole).name() == "#ffe09b"
     window.close()
     window.deleteLater()
+
+
+def test_image_download_product_selection_search_and_paste(qtbot, tmp_path: Path) -> None:
+    shared = "S" + "1" * 24
+    d_only = "D" + "2" * 24
+    unmatched = "Z" * 25
+    workbook = Workbook(); workbook.remove(workbook.active)
+    d_sheet = workbook.create_sheet("MS03106"); d_sheet.append(["Ident No.", "Test Date"])
+    d_sheet.append([shared, "2026-08-26 08:00:00"])
+    d_sheet.append([d_only, "2026-08-26 09:00:00"])
+    e_sheet = workbook.create_sheet("MS03206"); e_sheet.append(["Ident No.", "Test Date"])
+    e_sheet.append([shared, "2026-08-26 10:00:00"])
+    path = tmp_path / "selectable.xlsx"; workbook.save(path); workbook.close()
+
+    dialog = ImageDownloadDialog(Path(__file__).resolve().parents[1], path, tmp_path)
+    qtbot.addWidget(dialog)
+
+    assert dialog.product_selection_count.text() == "已选 3 / 3"
+    assert dialog._selected_products_by_family()["D"] == (shared, d_only)
+    assert dialog._selected_products_by_family()["E"] == (shared,)
+    dialog.product_search.setText(d_only)
+    dialog._set_visible_products(Qt.Unchecked)
+    assert dialog.product_selection_count.text() == "已选 2 / 3"
+    dialog.product_search.clear()
+
+    valid, invalid = parse_pasted_product_ids(f"{shared}\n{shared}, {unmatched}; SHORT")
+    assert valid == (shared, unmatched)
+    assert invalid == ("SHORT",)
+    invalid, missing = dialog._apply_pasted_product_ids(f"{shared}\n{unmatched}\nSHORT")
+    assert invalid == ("SHORT",)
+    assert missing == (unmatched,)
+    assert dialog.product_selection_count.text() == "已选 2 / 3"
+    assert dialog._selected_products_by_family()["D"] == (shared,)
+    assert dialog._selected_products_by_family()["E"] == (shared,)
+    dialog.close()
 
 
 def test_parameter_dialog_keeps_independent_detection_profiles(qtbot) -> None:

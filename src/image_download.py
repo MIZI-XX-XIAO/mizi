@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 import shutil
+import uuid
 import zipfile
 
 import cv2
@@ -77,6 +78,7 @@ class ImageDownloadRequest:
     password: str = ""
     batch_size: int = 80
     retry_manifest: Path | None = None
+    selected_products_by_family: dict[str, tuple[str, ...]] | None = None
 
     def validate(self) -> None:
         if not self.workbook_path.is_file():
@@ -90,6 +92,10 @@ class ImageDownloadRequest:
             raise ValueError("必须选择原图或压缩图")
         if not 10 <= self.batch_size <= 100:
             raise ValueError("每批产品号必须在10到100之间")
+        if self.selected_products_by_family is not None:
+            unknown_families = sorted(set(self.selected_products_by_family) - set(CODE_SCOPE))
+            if unknown_families:
+                raise ValueError("未知图片族：" + "、".join(unknown_families))
 
 
 @dataclass
@@ -405,12 +411,17 @@ class ImageDownloadOrchestrator:
         self.completed_items: set[tuple[str, str]] = set()
         self._operation_index = 0
         self.output_dir = request.output_root
-        self.temp_dir = self.output_dir / "_temporary_batches"
+        session_name = datetime.now().strftime("session_%Y%m%d_%H%M%S_%f_") + uuid.uuid4().hex[:8]
+        self.temp_root = self.output_dir / "_temporary_batches"
+        self.temp_dir = self.temp_root / session_name
+        self.archive_dir = self.output_dir / "archives"
         self.manifest_path = self.output_dir / "image_download_manifest.json"
         self._all_product_ids: list[str] = []
         self._products_by_family: dict[str, tuple[str, ...]] = {}
         self._sources_by_family: dict[str, str] = {}
         self._planned_items: set[tuple[str, str]] = set()
+        self._available_counts_by_family: dict[str, int] = {}
+        self._archives: list[dict[str, object]] = []
         self.runtime_log_path = self.output_dir / "image_download_run.log"
         self.log = self._log
 
@@ -435,7 +446,7 @@ class ImageDownloadOrchestrator:
 
     def _record_manifest(self) -> None:
         payload = {
-            "version": 2,
+            "version": 3,
             "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "workbook": str(self.request.workbook_path.resolve()),
             "quality": self.request.quality,
@@ -448,6 +459,7 @@ class ImageDownloadOrchestrator:
                 for family, product_ids in self._products_by_family.items()
             },
             "sources_by_family": self._sources_by_family,
+            "available_counts_by_family": self._available_counts_by_family,
             "planned_items": [list(item) for item in sorted(self._planned_items)],
             "completed_items": [list(item) for item in sorted(self.completed_items)],
             "failed_items": [
@@ -455,6 +467,7 @@ class ImageDownloadOrchestrator:
                  "category": issue.category, "message": issue.message}
                 for issue in self.issues if issue.status == "failed" and issue.product_id
             ],
+            "archives": self._archives,
         }
         self.manifest_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8",
@@ -477,10 +490,42 @@ class ImageDownloadOrchestrator:
             f"{label}：直接填写DMC，{len(product_ids)}个产品，代码 {'+'.join(image_codes)}"
             + (f"，第{retry_count}次重试" if retry_count else "")
         )
-        return self.backend.download_batch(
+        archive = self.backend.download_batch(
             product_ids, image_codes, self.request.quality, self.request.skip_rework,
             batch_dir, self.stop_event,
         )
+        if not archive.is_file() or archive.stat().st_size == 0:
+            raise FileNotFoundError("网站未生成ZIP下载文件")
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        family = image_codes[0][0] if image_codes else "MIX"
+        codes = "-".join(image_codes) or "none"
+        stem = f"{label}_{family}_{len(product_ids):04d}_{codes}_{self.request.quality}"
+        target = self.archive_dir / f"{stem}.zip"
+        suffix = 1
+        while target.exists():
+            target = self.archive_dir / f"{stem}_{suffix:02d}.zip"
+            suffix += 1
+        archived = Path(shutil.move(str(archive), str(target)))
+        self._archives.append({
+            "path": str(archived.resolve()),
+            "batch": label,
+            "family": family,
+            "product_count": len(product_ids),
+            "product_ids": list(product_ids),
+            "image_codes": list(image_codes),
+            "retry_count": retry_count,
+            "status": "downloaded",
+        })
+        self.log(f"原始ZIP已归档：{archived.name}")
+        self._checkpoint()
+        return archived
+
+    def _mark_archive(self, archive: Path, status: str) -> None:
+        resolved = str(archive.resolve())
+        for item in reversed(self._archives):
+            if item.get("path") == resolved:
+                item["status"] = status
+                break
 
     def _download_or_isolate(
         self, product_ids: Sequence[str], image_codes: Sequence[str], verify_retry: int = 0,
@@ -498,8 +543,6 @@ class ImageDownloadOrchestrator:
         for retry in range(3):
             try:
                 archive = self._attempt_download(active_products, active_codes, retry)
-                if not archive.is_file() or archive.stat().st_size == 0:
-                    raise FileNotFoundError("网站未生成ZIP下载文件")
                 break
             except InterruptedError:
                 raise
@@ -531,6 +574,8 @@ class ImageDownloadOrchestrator:
                 archive, self.output_dir, active_products, active_codes,
             )
         except Exception as exc:
+            self._mark_archive(archive, "invalid")
+            self._checkpoint()
             self.log(f"ZIP校验失败，开始隔离：{exc}")
             if len(active_products) > 1:
                 middle = len(active_products) // 2
@@ -550,12 +595,9 @@ class ImageDownloadOrchestrator:
 
         self.completed_items.update(outcome.found_items)
         self.issues.extend(outcome.issues)
+        self._mark_archive(archive, "processed")
         self._checkpoint()
         missing = requested - outcome.found_items
-        try:
-            archive.unlink()
-        except OSError:
-            pass
         # A successful ZIP may still omit or corrupt one image. Retry those items alone.
         retryable = {
             (issue.product_id, issue.image_code)
@@ -600,16 +642,29 @@ class ImageDownloadOrchestrator:
         summary.append(["已下载产品-代码项", len(self.completed_items)])
         summary.append(["异常项", len([i for i in self.issues if i.status == "failed"])])
         stations = workbook.create_sheet("AOI Stations")
-        stations.append(["图片范围", "AOI页签", "数据来源", "产品数", "计划项", "完成项"])
+        stations.append(["图片范围", "AOI页签", "数据来源", "可用产品数", "选中产品数", "计划项", "完成项"])
         for group in AOI_DOWNLOAD_GROUPS:
             family = group.family
             stations.append([
                 group.scope,
                 group.sheet_name,
                 self._sources_by_family.get(family, ""),
+                self._available_counts_by_family.get(family, 0),
                 len(self._products_by_family.get(family, ())),
                 len([item for item in self._planned_items if item[1].startswith(family)]),
                 len([item for item in self.completed_items if item[1].startswith(family)]),
+            ])
+        archives = workbook.create_sheet("Archives")
+        archive_columns = [
+            "path", "batch", "family", "product_count", "product_ids",
+            "image_codes", "retry_count", "status",
+        ]
+        archives.append(archive_columns)
+        for item in self._archives:
+            archives.append([
+                ";".join(item.get(column, [])) if isinstance(item.get(column), list)
+                else item.get(column, "")
+                for column in archive_columns
             ])
         detail = workbook.create_sheet("Issues")
         detail.append(columns)
@@ -635,6 +690,28 @@ class ImageDownloadOrchestrator:
         self, summary: ProductIdSummary,
     ) -> list[tuple[str, list[str], tuple[str, ...]]]:
         products_by_family = self._summary_products_by_family(summary)
+        self._available_counts_by_family = {
+            family: len(products_by_family.get(family, ())) for family in CODE_SCOPE
+        }
+        if self.request.selected_products_by_family is not None:
+            selected_by_family: dict[str, tuple[str, ...]] = {}
+            for family in CODE_SCOPE:
+                available = products_by_family.get(family, ())
+                requested = tuple(dict.fromkeys(
+                    str(item).strip().upper()
+                    for item in self.request.selected_products_by_family.get(family, ())
+                    if str(item).strip()
+                ))
+                unknown = sorted(set(requested) - set(available))
+                if unknown:
+                    preview = "、".join(unknown[:5])
+                    suffix = "…" if len(unknown) > 5 else ""
+                    raise ValueError(f"{CODE_SCOPE[family]}选择中包含非本AOI站产品号：{preview}{suffix}")
+                requested_set = set(requested)
+                selected_by_family[family] = tuple(
+                    product_id for product_id in available if product_id in requested_set
+                )
+            products_by_family = selected_by_family
         codes_by_family = {
             family: tuple(code for code in self.request.image_codes if code.startswith(family))
             for family in CODE_SCOPE
@@ -646,7 +723,8 @@ class ImageDownloadOrchestrator:
         ]
         if missing:
             details = "、".join(f"{group.sheet_name}（{group.station_name}）" for group in missing)
-            raise ValueError(f"所选图片代码缺少对应AOI产品号：{details}")
+            reason = "没有选中产品号" if self.request.selected_products_by_family is not None else "缺少对应AOI产品号"
+            raise ValueError(f"所选图片代码{reason}：{details}")
 
         self._products_by_family = {
             family: products_by_family[family]
@@ -677,6 +755,12 @@ class ImageDownloadOrchestrator:
 
     def _retry_jobs(self, summary: ProductIdSummary) -> list[tuple[str, list[str], tuple[str, ...]]]:
         payload = json.loads(self.request.retry_manifest.read_text(encoding="utf-8"))
+        self._archives = [dict(item) for item in payload.get("archives", []) if isinstance(item, dict)]
+        self._available_counts_by_family = {
+            str(key): int(value)
+            for key, value in payload.get("available_counts_by_family", {}).items()
+            if str(key) in CODE_SCOPE
+        }
         selected_codes = set(self.request.image_codes)
         failed_pairs = {
             (str(item.get("product_id", "")).strip().upper(), str(item.get("image_code", "")).strip().upper())
@@ -729,6 +813,7 @@ class ImageDownloadOrchestrator:
             raise ValueError("MES工作簿中没有可下载的AOI产品号")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
         for scope in CODE_SCOPE.values():
             (self.output_dir / "images" / scope).mkdir(parents=True, exist_ok=True)
         self._checkpoint()

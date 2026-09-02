@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from PySide6.QtCore import QPoint, QThread, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QRadioButton,
-    QScrollArea, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QPlainTextEdit, QScrollArea, QSpinBox, QTextEdit, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from src.image_download import (
@@ -17,6 +19,35 @@ from src.image_download import (
     extract_product_ids,
 )
 from .image_download_worker import ImageDownloadWorker
+
+
+def parse_pasted_product_ids(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """规范化粘贴清单，并分离非25位产品号。"""
+    tokens = tuple(dict.fromkeys(
+        token.strip().upper() for token in re.split(r"[,;，；\s]+", text) if token.strip()
+    ))
+    return (
+        tuple(token for token in tokens if len(token) == 25),
+        tuple(token for token in tokens if len(token) != 25),
+    )
+
+
+class _DmcPasteDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("粘贴DMC清单")
+        self.resize(620, 420)
+        layout = QVBoxLayout(self)
+        hint = QLabel("每行一个DMC，也支持逗号、分号或空格分隔。应用后将替换当前选择。")
+        hint.setWordWrap(True)
+        self.editor = QPlainTextEdit()
+        self.editor.setPlaceholderText("在此粘贴25位DMC清单")
+        buttons = QHBoxLayout()
+        cancel = QPushButton("取消"); cancel.clicked.connect(self.reject)
+        apply_button = QPushButton("应用清单"); apply_button.setObjectName("primaryButton")
+        apply_button.clicked.connect(self.accept)
+        buttons.addStretch(); buttons.addWidget(cancel); buttons.addWidget(apply_button)
+        layout.addWidget(hint); layout.addWidget(self.editor, 1); layout.addLayout(buttons)
 
 
 class _ImageDialogHeader(QFrame):
@@ -76,8 +107,8 @@ class ImageDownloadDialog(QDialog):
         self.setObjectName("imageDownloadDialog")
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setMinimumSize(900, 690)
-        self.resize(960, 790)
+        self.setMinimumSize(940, 720)
+        self.resize(1020, 900)
 
         surface = QFrame(); surface.setObjectName("imageDialogSurface")
         surface_layout = QVBoxLayout(surface); surface_layout.setContentsMargins(0, 0, 0, 18)
@@ -107,6 +138,32 @@ class ImageDownloadDialog(QDialog):
         self.product_stats.setObjectName("imageProductStats")
         self.product_stats.setWordWrap(True)
         source_grid.addWidget(self.product_stats, 2, 1, 1, 3)
+
+        product_group = QGroupBox("选择需要下载的产品号")
+        product_layout = QVBoxLayout(product_group); product_layout.setContentsMargins(16, 20, 16, 12)
+        product_layout.setSpacing(8)
+        product_tools = QHBoxLayout()
+        self.product_search = QLineEdit(); self.product_search.setPlaceholderText("搜索DMC")
+        self.product_search.setClearButtonEnabled(True)
+        self.product_search.textChanged.connect(self._filter_products)
+        self.product_select_all = QPushButton("全选可见")
+        self.product_clear = QPushButton("清空可见")
+        self.product_invert = QPushButton("反选可见")
+        self.product_paste = QPushButton("粘贴DMC清单…")
+        self.product_select_all.clicked.connect(lambda: self._set_visible_products(Qt.Checked))
+        self.product_clear.clicked.connect(lambda: self._set_visible_products(Qt.Unchecked))
+        self.product_invert.clicked.connect(self._invert_visible_products)
+        self.product_paste.clicked.connect(self._paste_product_ids)
+        product_tools.addWidget(self.product_search, 1)
+        product_tools.addWidget(self.product_select_all); product_tools.addWidget(self.product_clear)
+        product_tools.addWidget(self.product_invert); product_tools.addWidget(self.product_paste)
+        self.product_tree = QTreeWidget(); self.product_tree.setHeaderHidden(True)
+        self.product_tree.setMinimumHeight(190)
+        self.product_tree.itemChanged.connect(lambda _item, _column: self._update_selection_count())
+        self.product_selection_count = QLabel("已选 0 / 0")
+        self.product_selection_count.setObjectName("imageProductStats")
+        product_layout.addLayout(product_tools); product_layout.addWidget(self.product_tree)
+        product_layout.addWidget(self.product_selection_count)
 
         option_group = QGroupBox("需要下载的图片代码")
         option_layout = QVBoxLayout(option_group); option_layout.setContentsMargins(16, 20, 16, 12)
@@ -180,13 +237,15 @@ class ImageDownloadDialog(QDialog):
         buttons = QHBoxLayout(); buttons.addWidget(self.log_toggle); buttons.addWidget(self.retry_button)
         buttons.addStretch(); buttons.addWidget(self.cancel_button); buttons.addWidget(self.start_button)
 
-        body.addWidget(source_group); body.addWidget(option_group); body.addWidget(settings_group)
+        body.addWidget(source_group); body.addWidget(product_group); body.addWidget(option_group); body.addWidget(settings_group)
         body.addWidget(self.notice); body.addWidget(run_card); body.addWidget(self.log); body.addLayout(buttons)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(content)
         surface_layout.addWidget(scroll, 1)
         outer = QVBoxLayout(self); outer.setContentsMargins(14, 14, 14, 14); outer.addWidget(surface)
         self._input_widgets = (
             self.workbook_edit, workbook_button, inspect_button, self.output_edit, output_button,
+            self.product_search, self.product_tree, self.product_select_all, self.product_clear,
+            self.product_invert, self.product_paste,
             self.origin_radio, self.resize_radio, self.skip_rework, self.batch_size,
             self.username_edit, self.password_edit, self.retry_button, *self.code_checks.values(),
         )
@@ -225,12 +284,104 @@ class ImageDownloadDialog(QDialog):
                     f"来源 {summary.sources_by_family.get(family, '未找到')}"
                 )
             self.product_stats.setText("\n".join(group_lines))
+            self._populate_products(summary)
             self.product_stats.setObjectName("successBanner" if summary.valid_ids else "errorBanner")
             self.product_stats.style().unpolish(self.product_stats); self.product_stats.style().polish(self.product_stats)
         except Exception as exc:
+            self.product_tree.clear(); self._update_selection_count()
             self.product_summary = None; self.product_stats.setText(f"工作簿读取失败：{exc}")
             self.product_stats.setObjectName("errorBanner")
             self.product_stats.style().unpolish(self.product_stats); self.product_stats.style().polish(self.product_stats)
+
+    def _populate_products(self, summary: ProductIdSummary) -> None:
+        self.product_tree.blockSignals(True)
+        self.product_tree.clear()
+        for group in AOI_DOWNLOAD_GROUPS:
+            products = summary.products_by_family.get(group.family, ())
+            root = QTreeWidgetItem([f"{group.scope} / {group.sheet_name}（{len(products)}）"])
+            root.setData(0, Qt.UserRole, group.family)
+            root.setFlags(root.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
+            root.setCheckState(0, Qt.Checked if products else Qt.Unchecked)
+            self.product_tree.addTopLevelItem(root)
+            for product_id in products:
+                child = QTreeWidgetItem([product_id])
+                child.setData(0, Qt.UserRole, group.family)
+                child.setData(0, Qt.UserRole + 1, product_id)
+                child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+                child.setCheckState(0, Qt.Checked)
+                root.addChild(child)
+            root.setExpanded(True)
+        self.product_tree.blockSignals(False)
+        self.product_search.clear()
+        self._update_selection_count()
+
+    def _product_items(self):
+        for index in range(self.product_tree.topLevelItemCount()):
+            root = self.product_tree.topLevelItem(index)
+            for child_index in range(root.childCount()):
+                yield child_index, root, root.child(child_index)
+
+    def _filter_products(self, text: str) -> None:
+        query = text.strip().upper()
+        for index in range(self.product_tree.topLevelItemCount()):
+            root = self.product_tree.topLevelItem(index)
+            visible_count = 0
+            for child_index in range(root.childCount()):
+                child = root.child(child_index)
+                visible = not query or query in str(child.data(0, Qt.UserRole + 1)).upper()
+                child.setHidden(not visible)
+                visible_count += int(visible)
+            root.setHidden(bool(query) and visible_count == 0)
+
+    def _set_visible_products(self, state: Qt.CheckState) -> None:
+        self.product_tree.blockSignals(True)
+        for _index, _root, child in self._product_items():
+            if not child.isHidden(): child.setCheckState(0, state)
+        self.product_tree.blockSignals(False)
+        self._update_selection_count()
+
+    def _invert_visible_products(self) -> None:
+        self.product_tree.blockSignals(True)
+        for _index, _root, child in self._product_items():
+            if not child.isHidden():
+                child.setCheckState(0, Qt.Unchecked if child.checkState(0) == Qt.Checked else Qt.Checked)
+        self.product_tree.blockSignals(False)
+        self._update_selection_count()
+
+    def _selected_products_by_family(self) -> dict[str, tuple[str, ...]]:
+        selected: dict[str, list[str]] = {family: [] for family in CODE_SCOPE}
+        for _index, root, child in self._product_items():
+            if child.checkState(0) == Qt.Checked:
+                selected[str(root.data(0, Qt.UserRole))].append(str(child.data(0, Qt.UserRole + 1)))
+        return {family: tuple(products) for family, products in selected.items()}
+
+    def _update_selection_count(self) -> None:
+        items = [child for _index, _root, child in self._product_items()]
+        selected = sum(child.checkState(0) == Qt.Checked for child in items)
+        self.product_selection_count.setText(f"已选 {selected} / {len(items)}")
+
+    def _apply_pasted_product_ids(self, text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        valid, invalid = parse_pasted_product_ids(text)
+        requested = set(valid)
+        matched: set[str] = set()
+        self.product_tree.blockSignals(True)
+        for _index, _root, child in self._product_items():
+            product_id = str(child.data(0, Qt.UserRole + 1))
+            checked = product_id in requested
+            child.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+            if checked: matched.add(product_id)
+        self.product_tree.blockSignals(False)
+        self._update_selection_count()
+        return invalid, tuple(product_id for product_id in valid if product_id not in matched)
+
+    def _paste_product_ids(self) -> None:
+        dialog = _DmcPasteDialog(self)
+        if dialog.exec() != QDialog.Accepted: return
+        invalid, unmatched = self._apply_pasted_product_ids(dialog.editor.toPlainText())
+        messages = [f"已按粘贴清单更新选择：{self.product_selection_count.text()}"]
+        if invalid: messages.append(f"非25位：{'、'.join(invalid[:5])}{'…' if len(invalid) > 5 else ''}")
+        if unmatched: messages.append(f"工作簿中未找到：{'、'.join(unmatched[:5])}{'…' if len(unmatched) > 5 else ''}")
+        self._show_notice("\n".join(messages), "warning" if invalid or unmatched else "success")
 
     def _set_all_codes(self, checked: bool) -> None:
         for checkbox in self.code_checks.values(): checkbox.setChecked(checked)
@@ -277,22 +428,27 @@ class ImageDownloadDialog(QDialog):
             if not self.output_edit.text().strip(): raise ValueError("请选择图片保存位置")
             codes = self._selected_codes()
             quality = self._quality()
+            selected_products = self._selected_products_by_family()
+            if not any(selected_products.values()):
+                raise ValueError("请至少选择一个需要下载的产品号")
             if not self.retry_manifest:
                 missing_groups = [
                     group for group in AOI_DOWNLOAD_GROUPS
                     if any(code.startswith(group.family) for code in codes)
-                    and not self.product_summary.products_by_family.get(group.family, ())
+                    and not selected_products.get(group.family, ())
                 ]
                 if missing_groups:
                     details = "、".join(
                         f"{group.sheet_name}（{group.station_name}）" for group in missing_groups
                     )
-                    raise ValueError(f"所选图片代码缺少对应AOI产品号：{details}")
+                    raise ValueError(f"所选图片代码没有选中产品号：{details}")
             output = self.retry_manifest.parent if self.retry_manifest else default_image_download_dir(Path(self.output_edit.text().strip()))
             request = ImageDownloadRequest(
-                Path(self.workbook_edit.text().strip()), output, codes, quality,
-                self.skip_rework.isChecked(), self.username_edit.text().strip(),
-                self.password_edit.text(), self.batch_size.value(), self.retry_manifest,
+                workbook_path=Path(self.workbook_edit.text().strip()), output_root=output,
+                image_codes=codes, quality=quality, skip_rework=self.skip_rework.isChecked(),
+                username=self.username_edit.text().strip(), password=self.password_edit.text(),
+                batch_size=self.batch_size.value(), retry_manifest=self.retry_manifest,
+                selected_products_by_family=None if self.retry_manifest else selected_products,
             )
             request.validate()
         except Exception as exc:
