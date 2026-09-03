@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from PySide6.QtCore import QPoint, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QPoint, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QRadioButton,
@@ -109,6 +109,7 @@ class ImageDownloadDialog(QDialog):
         }
         self._product_groups: dict[str, QTreeWidgetItem] = {}
         self._updating_product_tree = False
+        self._product_range_anchor: tuple[str, str] | None = None
         self.retry_manifest: Path | None = None
         self.thread: QThread | None = None
         self.worker: ImageDownloadWorker | None = None
@@ -156,7 +157,7 @@ class ImageDownloadDialog(QDialog):
         self.product_filter_timer = QTimer(self); self.product_filter_timer.setSingleShot(True)
         self.product_filter_timer.setInterval(180)
         self.product_filter_timer.timeout.connect(self._apply_product_filter)
-        self.product_search.textChanged.connect(lambda _text: self.product_filter_timer.start())
+        self.product_search.textChanged.connect(self._schedule_product_filter)
         self.product_select_all = QPushButton("全选可见")
         self.product_clear = QPushButton("清空可见")
         self.product_invert = QPushButton("反选可见")
@@ -171,9 +172,14 @@ class ImageDownloadDialog(QDialog):
         self.product_tree = QTreeWidget(); self.product_tree.setHeaderHidden(True)
         self.product_tree.setMinimumHeight(190)
         self.product_tree.itemChanged.connect(self._on_product_item_changed)
+        self.product_tree.itemClicked.connect(self._remember_product_anchor)
+        self.product_tree.viewport().installEventFilter(self)
         self.product_selection_count = QLabel("已选 0 / 0")
         self.product_selection_count.setObjectName("imageProductStats")
         product_layout.addLayout(product_tools); product_layout.addWidget(self.product_tree)
+        range_hint = QLabel("提示：先点击起点，再按住 Shift 点击终点，可连续勾选或取消")
+        range_hint.setObjectName("imageProductStats")
+        product_layout.addWidget(range_hint)
         product_layout.addWidget(self.product_selection_count)
 
         option_group = QGroupBox("需要下载的图片代码")
@@ -308,6 +314,7 @@ class ImageDownloadDialog(QDialog):
             self.product_stats.style().unpolish(self.product_stats); self.product_stats.style().polish(self.product_stats)
 
     def _populate_products(self, summary: ProductIdSummary) -> None:
+        self._product_range_anchor = None
         self._updating_product_tree = True
         previous_signal_state = self.product_tree.blockSignals(True)
         self.product_tree.setUpdatesEnabled(False)
@@ -370,6 +377,10 @@ class ImageDownloadDialog(QDialog):
             self.product_tree.setUpdatesEnabled(True)
         self.product_tree.viewport().update()
 
+    def _schedule_product_filter(self, _text: str) -> None:
+        self._product_range_anchor = None
+        self.product_filter_timer.start()
+
     def _flush_product_filter(self) -> None:
         if not self.product_filter_timer.isActive(): return
         self.product_filter_timer.stop()
@@ -429,6 +440,54 @@ class ImageDownloadDialog(QDialog):
             self._updating_product_tree = False
         self._update_selection_count()
 
+    def _remember_product_anchor(self, item: QTreeWidgetItem, _column: int) -> None:
+        product_id = item.data(0, Qt.UserRole + 1)
+        family = str(item.data(0, Qt.UserRole) or "")
+        if product_id is not None and family in CODE_SCOPE:
+            self._product_range_anchor = (family, str(product_id))
+
+    def _set_single_product_state(self, family: str, product_id: str, checked: bool) -> None:
+        if checked: self._selected_product_ids_by_family[family].add(product_id)
+        else: self._selected_product_ids_by_family[family].discard(product_id)
+        self._sync_product_items({family}, visible_only=True)
+
+    def _apply_shift_product_range(self, item: QTreeWidgetItem) -> None:
+        family = str(item.data(0, Qt.UserRole) or "")
+        product_id = item.data(0, Qt.UserRole + 1)
+        if product_id is None or family not in CODE_SCOPE: return
+        product_id = str(product_id)
+        checked = item.checkState(0) != Qt.Checked
+        anchor = self._product_range_anchor
+        root = self._product_groups.get(family)
+        visible_items = [
+            root.child(index) for index in range(root.childCount())
+            if not root.child(index).isHidden()
+        ] if root is not None else []
+        visible_ids = [str(child.data(0, Qt.UserRole + 1)) for child in visible_items]
+        if anchor is None or anchor[0] != family or anchor[1] not in visible_ids or product_id not in visible_ids:
+            self._set_single_product_state(family, product_id, checked)
+            self._product_range_anchor = (family, product_id)
+            return
+        start, end = sorted((visible_ids.index(anchor[1]), visible_ids.index(product_id)))
+        selected = self._selected_product_ids_by_family[family]
+        for ranged_id in visible_ids[start:end + 1]:
+            if checked: selected.add(ranged_id)
+            else: selected.discard(ranged_id)
+        self._sync_product_items({family}, visible_only=True)
+
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            watched is self.product_tree.viewport()
+            and event.type() == QEvent.MouseButtonPress
+            and event.button() == Qt.LeftButton
+            and event.modifiers() & Qt.ShiftModifier
+        ):
+            item = self.product_tree.itemAt(event.position().toPoint())
+            if item is not None and item.data(0, Qt.UserRole + 1) is not None:
+                self._apply_shift_product_range(item)
+                return True
+        return super().eventFilter(watched, event)
+
     def _set_visible_products(self, state: Qt.CheckState) -> None:
         self._flush_product_filter()
         affected: set[str] = set()
@@ -466,8 +525,19 @@ class ImageDownloadDialog(QDialog):
         selected = sum(len(products) for products in self._selected_product_ids_by_family.values())
         total = sum(len(products) for products in self._product_ids_by_family.values())
         self.product_selection_count.setText(f"已选 {selected} / {total}")
+        self._update_code_availability()
+
+    def _update_code_availability(self) -> None:
+        if not hasattr(self, "code_checks"): return
+        for code, checkbox in self.code_checks.items():
+            available = bool(self._selected_product_ids_by_family[code[0]])
+            checkbox.setEnabled(available)
+            checkbox.setToolTip(
+                "" if available else "对应AOI站没有选中产品号，本图片代码不会参与下载"
+            )
 
     def _apply_pasted_product_ids(self, text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        self._product_range_anchor = None
         valid, invalid = parse_pasted_product_ids(text)
         requested = set(valid)
         matched: set[str] = set()
@@ -494,7 +564,10 @@ class ImageDownloadDialog(QDialog):
         for code, checkbox in self.code_checks.items(): checkbox.setChecked(code in PRIMARY_IMAGE_CODES)
 
     def _selected_codes(self) -> tuple[str, ...]:
-        return tuple(code for code in ALL_IMAGE_CODES if self.code_checks[code].isChecked())
+        return tuple(
+            code for code in ALL_IMAGE_CODES
+            if self.code_checks[code].isChecked() and self.code_checks[code].isEnabled()
+        )
 
     def _quality(self) -> str:
         if self.origin_radio.isChecked(): return "origin"
@@ -535,6 +608,8 @@ class ImageDownloadDialog(QDialog):
             selected_products = self._selected_products_by_family()
             if not any(selected_products.values()):
                 raise ValueError("请至少选择一个需要下载的产品号")
+            if not codes and any(checkbox.isChecked() for checkbox in self.code_checks.values()):
+                raise ValueError("已勾选的图片代码对应AOI站没有选中产品号")
             if not self.retry_manifest:
                 missing_groups = [
                     group for group in AOI_DOWNLOAD_GROUPS

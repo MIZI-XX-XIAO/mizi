@@ -12,7 +12,7 @@ from openpyxl import Workbook
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 from PySide6.QtCore import QSize, Qt  # noqa: E402
-from PySide6.QtTest import QSignalSpy  # noqa: E402
+from PySide6.QtTest import QSignalSpy, QTest  # noqa: E402
 from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton  # noqa: E402
 
 from gui.image_download_dialog import ImageDownloadDialog, parse_pasted_product_ids  # noqa: E402
@@ -158,7 +158,7 @@ def test_image_download_dialog_reads_mes_products_and_uses_safe_defaults(qtbot, 
     dialog.origin_radio.setChecked(True)
     dialog._start()
     assert dialog.worker is None
-    assert "MS03206" in dialog.notice.text()
+    assert "没有选中产品号" in dialog.notice.text()
     dialog.close(); window.close(); window.deleteLater()
 
 
@@ -269,6 +269,8 @@ def test_large_product_group_toggle_emits_once_and_keeps_other_families(qtbot, t
     qtbot.addWidget(dialog)
     dialog._populate_products(summary)
     root = dialog._product_groups["D"]
+    dialog.code_checks["DE"].setChecked(True)
+    dialog.code_checks["EE"].setChecked(True)
     spy = QSignalSpy(dialog.product_tree.itemChanged)
 
     root.setCheckState(0, Qt.Unchecked)
@@ -277,10 +279,83 @@ def test_large_product_group_toggle_emits_once_and_keeps_other_families(qtbot, t
     assert dialog.product_selection_count.text() == "已选 1 / 3001"
     assert dialog._selected_products_by_family()["D"] == ()
     assert dialog._selected_products_by_family()["E"] == (e_product,)
+    assert not dialog.code_checks["DE"].isEnabled()
+    assert dialog.code_checks["EE"].isEnabled()
+    assert dialog._selected_codes() == ("EE",)
     assert all(root.child(index).checkState(0) == Qt.Unchecked for index in range(root.childCount()))
     root.child(0).setCheckState(0, Qt.Checked)
     assert root.checkState(0) == Qt.PartiallyChecked
     assert dialog.product_selection_count.text() == "已选 2 / 3001"
+    assert dialog.code_checks["DE"].isEnabled()
+    assert dialog._selected_codes() == ("DE", "EE")
+    dialog.close()
+
+
+def test_shift_click_toggles_visible_range_without_crossing_family(qtbot, tmp_path: Path) -> None:
+    d_products = tuple(f"D{index:024d}" for index in range(6))
+    e_products = tuple(f"E{index:024d}" for index in range(2))
+    summary = ProductIdSummary(
+        d_products + e_products, (), 0,
+        products_by_family={"D": d_products, "E": e_products, "F": (), "G": ()},
+    )
+    dialog = ImageDownloadDialog(Path(__file__).resolve().parents[1], None, tmp_path)
+    qtbot.addWidget(dialog); dialog._populate_products(summary); dialog.show()
+    d_root = dialog._product_groups["D"]
+    e_root = dialog._product_groups["E"]
+
+    QTest.mouseClick(
+        dialog.product_tree.viewport(), Qt.LeftButton, Qt.NoModifier,
+        dialog.product_tree.visualItemRect(d_root.child(1)).center(),
+    )
+    QTest.mouseClick(
+        dialog.product_tree.viewport(), Qt.LeftButton, Qt.ShiftModifier,
+        dialog.product_tree.visualItemRect(d_root.child(4)).center(),
+    )
+
+    assert dialog._selected_products_by_family()["D"] == (d_products[0], d_products[5])
+    assert dialog._selected_products_by_family()["E"] == e_products
+    dialog._remember_product_anchor(d_root.child(0), 0)
+    dialog._apply_shift_product_range(e_root.child(1))
+    assert dialog._selected_products_by_family()["D"] == (d_products[0], d_products[5])
+    assert dialog._selected_products_by_family()["E"] == (e_products[0],)
+    assert dialog._product_range_anchor == ("E", e_products[1])
+    dialog.close()
+
+
+def test_shift_range_uses_visible_items_and_selection_actions_reset_anchor(qtbot, tmp_path: Path, monkeypatch) -> None:
+    products = tuple(f"D{index:024d}" for index in range(6))
+    summary = ProductIdSummary(
+        products, (), 0,
+        products_by_family={"D": products, "E": (), "F": (), "G": ()},
+    )
+    dialog = ImageDownloadDialog(Path(__file__).resolve().parents[1], None, tmp_path)
+    qtbot.addWidget(dialog); dialog._populate_products(summary)
+    root = dialog._product_groups["D"]
+    root.setCheckState(0, Qt.Unchecked)
+    root.child(2).setHidden(True)
+    dialog._remember_product_anchor(root.child(1), 0)
+    refresh_count = 0
+    original_refresh = dialog._update_selection_count
+
+    def counted_refresh() -> None:
+        nonlocal refresh_count
+        refresh_count += 1
+        original_refresh()
+
+    monkeypatch.setattr(dialog, "_update_selection_count", counted_refresh)
+    dialog._apply_shift_product_range(root.child(4))
+
+    assert refresh_count == 1
+    assert dialog._selected_products_by_family()["D"] == (products[1], products[3], products[4])
+    assert root.child(2).checkState(0) == Qt.Unchecked
+    dialog.product_search.setText(products[0])
+    assert dialog._product_range_anchor is None
+    dialog._remember_product_anchor(root.child(1), 0)
+    dialog._apply_pasted_product_ids(products[5])
+    assert dialog._product_range_anchor is None
+    dialog._remember_product_anchor(root.child(1), 0)
+    dialog._populate_products(summary)
+    assert dialog._product_range_anchor is None
     dialog.close()
 
 
