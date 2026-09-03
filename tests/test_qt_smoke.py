@@ -12,12 +12,14 @@ from openpyxl import Workbook
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 from PySide6.QtCore import QSize, Qt  # noqa: E402
+from PySide6.QtTest import QSignalSpy  # noqa: E402
 from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton  # noqa: E402
 
 from gui.image_download_dialog import ImageDownloadDialog, parse_pasted_product_ids  # noqa: E402
 from gui.main_window import MainWindow  # noqa: E402
 from gui.parameter_dialog import ParameterDialog  # noqa: E402
 from gui.workbench import LayoutProfile, WorkbenchStack, resolve_layout_profile  # noqa: E402
+from src.image_download import ProductIdSummary  # noqa: E402
 from src.result_views import ResultView  # noqa: E402
 from src.station_workbook import StationWorkbookData  # noqa: E402
 
@@ -253,6 +255,32 @@ def test_image_download_product_selection_search_and_paste(qtbot, tmp_path: Path
     assert dialog.product_selection_count.text() == "已选 2 / 3"
     assert dialog._selected_products_by_family()["D"] == (shared,)
     assert dialog._selected_products_by_family()["E"] == (shared,)
+    dialog.close()
+
+
+def test_large_product_group_toggle_emits_once_and_keeps_other_families(qtbot, tmp_path: Path) -> None:
+    d_products = tuple(f"D{index:024d}" for index in range(3000))
+    e_product = "E" + "9" * 24
+    summary = ProductIdSummary(
+        d_products + (e_product,), (), 0,
+        products_by_family={"D": d_products, "E": (e_product,), "F": (), "G": ()},
+    )
+    dialog = ImageDownloadDialog(Path(__file__).resolve().parents[1], None, tmp_path)
+    qtbot.addWidget(dialog)
+    dialog._populate_products(summary)
+    root = dialog._product_groups["D"]
+    spy = QSignalSpy(dialog.product_tree.itemChanged)
+
+    root.setCheckState(0, Qt.Unchecked)
+
+    assert spy.count() == 1
+    assert dialog.product_selection_count.text() == "已选 1 / 3001"
+    assert dialog._selected_products_by_family()["D"] == ()
+    assert dialog._selected_products_by_family()["E"] == (e_product,)
+    assert all(root.child(index).checkState(0) == Qt.Unchecked for index in range(root.childCount()))
+    root.child(0).setCheckState(0, Qt.Checked)
+    assert root.checkState(0) == Qt.PartiallyChecked
+    assert dialog.product_selection_count.text() == "已选 2 / 3001"
     dialog.close()
 
 

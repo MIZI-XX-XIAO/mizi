@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from PySide6.QtCore import QPoint, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QPoint, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QRadioButton,
@@ -101,6 +101,14 @@ class ImageDownloadDialog(QDialog):
         super().__init__(parent)
         self.project_root = project_root
         self.product_summary: ProductIdSummary | None = None
+        self._product_ids_by_family: dict[str, tuple[str, ...]] = {
+            family: () for family in CODE_SCOPE
+        }
+        self._selected_product_ids_by_family: dict[str, set[str]] = {
+            family: set() for family in CODE_SCOPE
+        }
+        self._product_groups: dict[str, QTreeWidgetItem] = {}
+        self._updating_product_tree = False
         self.retry_manifest: Path | None = None
         self.thread: QThread | None = None
         self.worker: ImageDownloadWorker | None = None
@@ -145,7 +153,10 @@ class ImageDownloadDialog(QDialog):
         product_tools = QHBoxLayout()
         self.product_search = QLineEdit(); self.product_search.setPlaceholderText("搜索DMC")
         self.product_search.setClearButtonEnabled(True)
-        self.product_search.textChanged.connect(self._filter_products)
+        self.product_filter_timer = QTimer(self); self.product_filter_timer.setSingleShot(True)
+        self.product_filter_timer.setInterval(180)
+        self.product_filter_timer.timeout.connect(self._apply_product_filter)
+        self.product_search.textChanged.connect(lambda _text: self.product_filter_timer.start())
         self.product_select_all = QPushButton("全选可见")
         self.product_clear = QPushButton("清空可见")
         self.product_invert = QPushButton("反选可见")
@@ -159,7 +170,7 @@ class ImageDownloadDialog(QDialog):
         product_tools.addWidget(self.product_invert); product_tools.addWidget(self.product_paste)
         self.product_tree = QTreeWidget(); self.product_tree.setHeaderHidden(True)
         self.product_tree.setMinimumHeight(190)
-        self.product_tree.itemChanged.connect(lambda _item, _column: self._update_selection_count())
+        self.product_tree.itemChanged.connect(self._on_product_item_changed)
         self.product_selection_count = QLabel("已选 0 / 0")
         self.product_selection_count.setObjectName("imageProductStats")
         product_layout.addLayout(product_tools); product_layout.addWidget(self.product_tree)
@@ -288,31 +299,52 @@ class ImageDownloadDialog(QDialog):
             self.product_stats.setObjectName("successBanner" if summary.valid_ids else "errorBanner")
             self.product_stats.style().unpolish(self.product_stats); self.product_stats.style().polish(self.product_stats)
         except Exception as exc:
-            self.product_tree.clear(); self._update_selection_count()
+            self.product_tree.clear(); self._product_groups.clear()
+            self._product_ids_by_family = {family: () for family in CODE_SCOPE}
+            self._selected_product_ids_by_family = {family: set() for family in CODE_SCOPE}
+            self._update_selection_count()
             self.product_summary = None; self.product_stats.setText(f"工作簿读取失败：{exc}")
             self.product_stats.setObjectName("errorBanner")
             self.product_stats.style().unpolish(self.product_stats); self.product_stats.style().polish(self.product_stats)
 
     def _populate_products(self, summary: ProductIdSummary) -> None:
-        self.product_tree.blockSignals(True)
-        self.product_tree.clear()
-        for group in AOI_DOWNLOAD_GROUPS:
-            products = summary.products_by_family.get(group.family, ())
-            root = QTreeWidgetItem([f"{group.scope} / {group.sheet_name}（{len(products)}）"])
-            root.setData(0, Qt.UserRole, group.family)
-            root.setFlags(root.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
-            root.setCheckState(0, Qt.Checked if products else Qt.Unchecked)
-            self.product_tree.addTopLevelItem(root)
-            for product_id in products:
-                child = QTreeWidgetItem([product_id])
-                child.setData(0, Qt.UserRole, group.family)
-                child.setData(0, Qt.UserRole + 1, product_id)
-                child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
-                child.setCheckState(0, Qt.Checked)
-                root.addChild(child)
-            root.setExpanded(True)
-        self.product_tree.blockSignals(False)
-        self.product_search.clear()
+        self._updating_product_tree = True
+        previous_signal_state = self.product_tree.blockSignals(True)
+        self.product_tree.setUpdatesEnabled(False)
+        try:
+            self.product_tree.clear()
+            self._product_groups.clear()
+            self._product_ids_by_family = {
+                family: tuple(summary.products_by_family.get(family, ()))
+                for family in CODE_SCOPE
+            }
+            self._selected_product_ids_by_family = {
+                family: set(products)
+                for family, products in self._product_ids_by_family.items()
+            }
+            for group in AOI_DOWNLOAD_GROUPS:
+                products = self._product_ids_by_family[group.family]
+                root = QTreeWidgetItem([f"{group.scope} / {group.sheet_name}（{len(products)}）"])
+                root.setData(0, Qt.UserRole, group.family)
+                root.setFlags(root.flags() | Qt.ItemIsUserCheckable)
+                self.product_tree.addTopLevelItem(root)
+                self._product_groups[group.family] = root
+                for product_id in products:
+                    child = QTreeWidgetItem([product_id])
+                    child.setData(0, Qt.UserRole, group.family)
+                    child.setData(0, Qt.UserRole + 1, product_id)
+                    child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+                    child.setCheckState(0, Qt.Checked)
+                    root.addChild(child)
+                root.setCheckState(0, Qt.Checked if products else Qt.Unchecked)
+                root.setExpanded(True)
+        finally:
+            self.product_tree.setUpdatesEnabled(True)
+            self.product_tree.blockSignals(previous_signal_state)
+            self._updating_product_tree = False
+        if self.product_search.text(): self.product_search.clear()
+        self.product_filter_timer.stop()
+        self.product_tree.viewport().update()
         self._update_selection_count()
 
     def _product_items(self):
@@ -321,57 +353,129 @@ class ImageDownloadDialog(QDialog):
             for child_index in range(root.childCount()):
                 yield child_index, root, root.child(child_index)
 
-    def _filter_products(self, text: str) -> None:
-        query = text.strip().upper()
-        for index in range(self.product_tree.topLevelItemCount()):
-            root = self.product_tree.topLevelItem(index)
-            visible_count = 0
-            for child_index in range(root.childCount()):
-                child = root.child(child_index)
-                visible = not query or query in str(child.data(0, Qt.UserRole + 1)).upper()
-                child.setHidden(not visible)
-                visible_count += int(visible)
-            root.setHidden(bool(query) and visible_count == 0)
+    def _apply_product_filter(self) -> None:
+        query = self.product_search.text().strip().upper()
+        self.product_tree.setUpdatesEnabled(False)
+        try:
+            for index in range(self.product_tree.topLevelItemCount()):
+                root = self.product_tree.topLevelItem(index)
+                visible_count = 0
+                for child_index in range(root.childCount()):
+                    child = root.child(child_index)
+                    visible = not query or query in str(child.data(0, Qt.UserRole + 1)).upper()
+                    child.setHidden(not visible)
+                    visible_count += int(visible)
+                root.setHidden(bool(query) and visible_count == 0)
+        finally:
+            self.product_tree.setUpdatesEnabled(True)
+        self.product_tree.viewport().update()
+
+    def _flush_product_filter(self) -> None:
+        if not self.product_filter_timer.isActive(): return
+        self.product_filter_timer.stop()
+        self._apply_product_filter()
+
+    def _group_check_state(self, family: str) -> Qt.CheckState:
+        selected_count = len(self._selected_product_ids_by_family[family])
+        total_count = len(self._product_ids_by_family[family])
+        if not selected_count: return Qt.Unchecked
+        if selected_count == total_count: return Qt.Checked
+        return Qt.PartiallyChecked
+
+    def _sync_product_items(self, families: set[str], visible_only: bool = False) -> None:
+        self._updating_product_tree = True
+        previous_signal_state = self.product_tree.blockSignals(True)
+        self.product_tree.setUpdatesEnabled(False)
+        try:
+            for family in families:
+                root = self._product_groups.get(family)
+                if root is None: continue
+                for child_index in range(root.childCount()):
+                    child = root.child(child_index)
+                    if visible_only and child.isHidden(): continue
+                    product_id = str(child.data(0, Qt.UserRole + 1))
+                    desired = Qt.Checked if product_id in self._selected_product_ids_by_family[family] else Qt.Unchecked
+                    if child.checkState(0) != desired: child.setCheckState(0, desired)
+                root.setCheckState(0, self._group_check_state(family))
+        finally:
+            self.product_tree.setUpdatesEnabled(True)
+            self.product_tree.blockSignals(previous_signal_state)
+            self._updating_product_tree = False
+        self.product_tree.viewport().update()
+        self._update_selection_count()
+
+    def _on_product_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
+        if self._updating_product_tree: return
+        family = str(item.data(0, Qt.UserRole) or "")
+        if family not in CODE_SCOPE: return
+        product_id = item.data(0, Qt.UserRole + 1)
+        if product_id is None:
+            if item.checkState(0) == Qt.Unchecked:
+                self._selected_product_ids_by_family[family].clear()
+            else:
+                self._selected_product_ids_by_family[family] = set(self._product_ids_by_family[family])
+            self._sync_product_items({family})
+            return
+        if item.checkState(0) == Qt.Checked:
+            self._selected_product_ids_by_family[family].add(str(product_id))
+        else:
+            self._selected_product_ids_by_family[family].discard(str(product_id))
+        self._updating_product_tree = True
+        previous_signal_state = self.product_tree.blockSignals(True)
+        try:
+            self._product_groups[family].setCheckState(0, self._group_check_state(family))
+        finally:
+            self.product_tree.blockSignals(previous_signal_state)
+            self._updating_product_tree = False
+        self._update_selection_count()
 
     def _set_visible_products(self, state: Qt.CheckState) -> None:
-        self.product_tree.blockSignals(True)
-        for _index, _root, child in self._product_items():
-            if not child.isHidden(): child.setCheckState(0, state)
-        self.product_tree.blockSignals(False)
-        self._update_selection_count()
+        self._flush_product_filter()
+        affected: set[str] = set()
+        for _index, root, child in self._product_items():
+            if child.isHidden(): continue
+            family = str(root.data(0, Qt.UserRole)); product_id = str(child.data(0, Qt.UserRole + 1))
+            affected.add(family)
+            if state == Qt.Checked: self._selected_product_ids_by_family[family].add(product_id)
+            else: self._selected_product_ids_by_family[family].discard(product_id)
+        self._sync_product_items(affected, visible_only=True)
 
     def _invert_visible_products(self) -> None:
-        self.product_tree.blockSignals(True)
-        for _index, _root, child in self._product_items():
-            if not child.isHidden():
-                child.setCheckState(0, Qt.Unchecked if child.checkState(0) == Qt.Checked else Qt.Checked)
-        self.product_tree.blockSignals(False)
-        self._update_selection_count()
+        self._flush_product_filter()
+        affected: set[str] = set()
+        for _index, root, child in self._product_items():
+            if child.isHidden(): continue
+            family = str(root.data(0, Qt.UserRole)); product_id = str(child.data(0, Qt.UserRole + 1))
+            affected.add(family)
+            if product_id in self._selected_product_ids_by_family[family]:
+                self._selected_product_ids_by_family[family].discard(product_id)
+            else:
+                self._selected_product_ids_by_family[family].add(product_id)
+        self._sync_product_items(affected, visible_only=True)
 
     def _selected_products_by_family(self) -> dict[str, tuple[str, ...]]:
-        selected: dict[str, list[str]] = {family: [] for family in CODE_SCOPE}
-        for _index, root, child in self._product_items():
-            if child.checkState(0) == Qt.Checked:
-                selected[str(root.data(0, Qt.UserRole))].append(str(child.data(0, Qt.UserRole + 1)))
-        return {family: tuple(products) for family, products in selected.items()}
+        return {
+            family: tuple(
+                product_id for product_id in self._product_ids_by_family[family]
+                if product_id in self._selected_product_ids_by_family[family]
+            )
+            for family in CODE_SCOPE
+        }
 
     def _update_selection_count(self) -> None:
-        items = [child for _index, _root, child in self._product_items()]
-        selected = sum(child.checkState(0) == Qt.Checked for child in items)
-        self.product_selection_count.setText(f"已选 {selected} / {len(items)}")
+        selected = sum(len(products) for products in self._selected_product_ids_by_family.values())
+        total = sum(len(products) for products in self._product_ids_by_family.values())
+        self.product_selection_count.setText(f"已选 {selected} / {total}")
 
     def _apply_pasted_product_ids(self, text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
         valid, invalid = parse_pasted_product_ids(text)
         requested = set(valid)
         matched: set[str] = set()
-        self.product_tree.blockSignals(True)
-        for _index, _root, child in self._product_items():
-            product_id = str(child.data(0, Qt.UserRole + 1))
-            checked = product_id in requested
-            child.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
-            if checked: matched.add(product_id)
-        self.product_tree.blockSignals(False)
-        self._update_selection_count()
+        for family, products in self._product_ids_by_family.items():
+            selected = set(products) & requested
+            self._selected_product_ids_by_family[family] = selected
+            matched.update(selected)
+        self._sync_product_items(set(CODE_SCOPE))
         return invalid, tuple(product_id for product_id in valid if product_id not in matched)
 
     def _paste_product_ids(self) -> None:
