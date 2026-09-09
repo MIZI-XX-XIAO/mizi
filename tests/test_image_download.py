@@ -306,6 +306,47 @@ def test_missing_dedicated_sheet_falls_back_to_exact_station_location(tmp_path: 
     assert result.sources_by_family["D"] == "工站匹配：MS0310all"
 
 
+def test_arbitrary_sheet_with_ident_no_column_is_used_as_generic_product_list(tmp_path: Path) -> None:
+    first, second = _product(1), _product(2)
+    path = tmp_path / "generic_dmc_list.xlsx"
+    book = Workbook(); sheet = book.active; sheet.title = "DMC清单"
+    sheet.append(["备注"])
+    sheet.append(["Ident No."])
+    sheet.append([second])
+    sheet.append([first])
+    sheet.append([first])
+    sheet.append(["SHORT"])
+    book.save(path); book.close()
+
+    result = extract_product_ids(path)
+
+    for family in "DEFG":
+        assert result.products_by_family[family] == (second, first)
+        assert result.invalid_ids_by_family[family] == ("SHORT",)
+        assert result.duplicate_counts_by_family[family] == 1
+        assert result.sources_by_family[family] == "通用表头：DMC清单"
+    assert result.valid_ids == (second, first)
+    assert result.invalid_ids == ("SHORT",)
+
+
+def test_generic_ident_no_sheet_does_not_fill_missing_family_in_station_workbook(tmp_path: Path) -> None:
+    station_product, unrelated_product = _product(1), _product(2)
+    path = tmp_path / "mixed.xlsx"
+    book = Workbook(); station = book.active; station.title = "MS03106"
+    station.append(["Ident No."])
+    station.append([station_product])
+    other = book.create_sheet("Other")
+    other.append(["Ident No."])
+    other.append([unrelated_product])
+    book.save(path); book.close()
+
+    result = extract_product_ids(path)
+
+    assert result.products_by_family["D"] == (station_product,)
+    assert result.products_by_family["E"] == ()
+    assert unrelated_product not in result.valid_ids
+
+
 def test_82_products_are_split_into_80_and_2(tmp_path: Path) -> None:
     products = tuple(_product(index) for index in range(82))
     backend = FakeBackend()

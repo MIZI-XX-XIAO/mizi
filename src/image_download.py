@@ -149,15 +149,9 @@ def _timestamp(value: object) -> pd.Timestamp:
     return pd.to_datetime(text, errors="coerce", yearfirst=year_first, dayfirst=not year_first)
 
 
-def _read_aoi_sheet_records(workbook, expected_name: str) -> tuple[list[tuple[str, pd.Timestamp, int]], str]:
-    """按名称读取专用AOI页签中的Ident No.记录，名称匹配不区分大小写。"""
-    actual_name = next(
-        (name for name in workbook.sheetnames if name.strip().casefold() == expected_name.casefold()),
-        "",
-    )
-    if not actual_name:
-        return [], ""
-    rows = list(workbook[actual_name].iter_rows(values_only=True))
+def _read_ident_sheet_records(workbook, sheet_name: str) -> list[tuple[str, pd.Timestamp, int]]:
+    """读取一个页签内所有以Ident No.为表头的数据段。"""
+    rows = list(workbook[sheet_name].iter_rows(values_only=True))
     starts = [
         index for index, row in enumerate(rows)
         if row and any(_normalized_header(value) == "identno" for value in row)
@@ -177,7 +171,18 @@ def _read_aoi_sheet_records(workbook, expected_name: str) -> tuple[list[tuple[st
                 continue
             date_value = row[date_index] if 0 <= date_index < len(row) else None
             records.append((product_id, _timestamp(date_value), row_index + 1))
-    return records, actual_name
+    return records
+
+
+def _read_aoi_sheet_records(workbook, expected_name: str) -> tuple[list[tuple[str, pd.Timestamp, int]], str]:
+    """按名称读取专用AOI页签中的Ident No.记录，名称匹配不区分大小写。"""
+    actual_name = next(
+        (name for name in workbook.sheetnames if name.strip().casefold() == expected_name.casefold()),
+        "",
+    )
+    if not actual_name:
+        return [], ""
+    return _read_ident_sheet_records(workbook, actual_name), actual_name
 
 
 def _summarize_records(
@@ -207,7 +212,7 @@ def _summarize_records(
 
 
 def extract_product_ids(workbook_path: Path) -> ProductIdSummary:
-    """按四个AOI工站提取产品号，优先使用专用页签并按工站位置兜底。"""
+    """提取AOI产品号，并兼容只有任意页签Ident No.列的简单工作簿。"""
     from src.station_sources import load_station_catalog
     from src.station_workbook import load_station_workbook
 
@@ -216,6 +221,8 @@ def extract_product_ids(workbook_path: Path) -> ProductIdSummary:
         raise FileNotFoundError(f"Excel工作簿不存在：{resolved}")
     exact_records: dict[str, list[tuple[str, pd.Timestamp, int]]] = {}
     exact_sources: dict[str, str] = {}
+    generic_records: list[tuple[str, pd.Timestamp, int]] = []
+    generic_sources: list[str] = []
     book = load_workbook(
         resolved, read_only=True, data_only=True,
         keep_vba=resolved.suffix.lower() == ".xlsm",
@@ -225,6 +232,11 @@ def extract_product_ids(workbook_path: Path) -> ProductIdSummary:
             records, source = _read_aoi_sheet_records(book, group.sheet_name)
             exact_records[group.family] = records
             exact_sources[group.family] = source
+        for sheet_name in book.sheetnames:
+            records = _read_ident_sheet_records(book, sheet_name)
+            if records:
+                generic_records.extend(records)
+                generic_sources.append(sheet_name)
     finally:
         book.close()
 
@@ -244,14 +256,12 @@ def extract_product_ids(workbook_path: Path) -> ProductIdSummary:
                 "station_id", "dmc_raw", "test_date", "source_row", "source_sheet",
             ])
 
-    products_by_family: dict[str, tuple[str, ...]] = {}
-    invalid_by_family: dict[str, tuple[str, ...]] = {}
-    duplicates_by_family: dict[str, int] = {}
-    sources_by_family: dict[str, str] = {}
+    station_records: dict[str, list[tuple[str, pd.Timestamp, int]]] = {}
+    station_sources: dict[str, str] = {}
     for group in AOI_DOWNLOAD_GROUPS:
-        records = exact_records[group.family]
-        source = exact_sources[group.family]
-        if not records and fallback_events is not None:
+        records: list[tuple[str, pd.Timestamp, int]] = []
+        source = ""
+        if not exact_records[group.family] and fallback_events is not None:
             station_events = fallback_events[
                 fallback_events["station_id"].astype(str).eq(group.station_id)
             ]
@@ -264,7 +274,29 @@ def extract_product_ids(workbook_path: Path) -> ProductIdSummary:
                 str(value) for value in station_events.get("source_sheet", pd.Series(dtype=str))
                 if str(value).strip()
             ))
-            source = "工站匹配：" + "、".join(fallback_sources) if fallback_sources else "未找到"
+            source = "工站匹配：" + "、".join(fallback_sources) if fallback_sources else ""
+        station_records[group.family] = records
+        station_sources[group.family] = source
+
+    use_generic_records = bool(generic_records) and not any(
+        exact_records[group.family] or station_records[group.family]
+        for group in AOI_DOWNLOAD_GROUPS
+    )
+    generic_source = "通用表头：" + "、".join(generic_sources)
+
+    products_by_family: dict[str, tuple[str, ...]] = {}
+    invalid_by_family: dict[str, tuple[str, ...]] = {}
+    duplicates_by_family: dict[str, int] = {}
+    sources_by_family: dict[str, str] = {}
+    for group in AOI_DOWNLOAD_GROUPS:
+        records = exact_records[group.family]
+        source = exact_sources[group.family]
+        if not records and station_records[group.family]:
+            records = station_records[group.family]
+            source = station_sources[group.family]
+        if not records and use_generic_records:
+            records = generic_records
+            source = generic_source
         valid, invalid, duplicates = _summarize_records(records)
         products_by_family[group.family] = valid
         invalid_by_family[group.family] = invalid

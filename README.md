@@ -176,7 +176,7 @@ uv run --frozen --group build python scripts/build_portable.py --clean
 - 分类目录中已有同名图片时，相同内容直接复用，内容不同则放入`_quarantine`隔离，不覆盖先前图片。
 - 异常项写入 `image_download_issues.csv` 和 `image_download_summary.xlsx`；可通过“仅重试异常项…”继续失败内容。
 - LDAP密码仅在本次后台任务内存中使用，不保存到配置、日志或任务清单。
-- 产品号只取自 `MS03106`、`MS03206`、`MS03301`、`MS03302` 四个AOI工站；专用页签缺失时按工站位置兜底。
+- 产品号优先取自 `MS03106`、`MS03206`、`MS03301`、`MS03302` 四个AOI工站；专用页签缺失时按工站位置兜底。若整本工作簿无法识别AOI工站，则扫描任意页签的 `Ident No.` 表头，并将其中的25位DMC作为通用下载清单。
 - 多工站任务按D/E/F/G图片族独立分批，不会把一个AOI工站的产品号交叉请求到其他工站。
 - 每个任务保存 `image_download_run.log`，记录网站识别数量、批次状态和原始报错，便于现场排查。
 
