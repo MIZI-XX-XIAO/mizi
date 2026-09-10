@@ -24,6 +24,7 @@ from .contour_extractor import (
     DETECTION_KEYS, DETECTION_PROFILE_NAMES, EXTRACTED_COLUMNS, extract_product,
     image_scale_to_reference, normalize_analysis_config, read_image,
 )
+from .defect_cause_analysis import analyze_defect_causes, load_cause_rules
 from .defect_evidence import (
     analyze_code_spatial_associations, build_station_attribution,
     discover_code_patterns, discover_spatial_trajectories,
@@ -187,6 +188,7 @@ class ExcelTargetAnalysisRequest:
     config_snapshot: dict[str, Any] | None = None
     source_files: tuple[Path, ...] = ()
     defect_catalog_path: Path | None = None
+    station_parameters_frame: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass(frozen=True)
@@ -401,6 +403,7 @@ def run_excel_target_task(
         catalog = load_defect_catalog(
             project_root / "config" / "defect_code_catalog.csv", request.defect_catalog_path,
         )
+        cause_rules = load_cause_rules(project_root / "config" / "defect_cause_rules.yaml")
         all_codes = normalize_defect_codes(request.station_events_frame, catalog)
         if request.selection.scopes:
             all_codes = all_codes[
@@ -456,6 +459,11 @@ def run_excel_target_task(
         interaction_parts: list[pd.DataFrame] = []
         validation_parts: list[pd.DataFrame] = []
         finding_parts: list[pd.DataFrame] = []
+        downtime_parts: list[pd.DataFrame] = []
+        exposure_parts: list[pd.DataFrame] = []
+        hypothesis_parts: list[pd.DataFrame] = []
+        cause_evidence_parts: list[pd.DataFrame] = []
+        cause_summaries: list[dict[str, Any]] = []
         relationship_summaries: list[dict[str, Any]] = []
         if request.selection.includes("process_relationships"):
             defect_events = selected_codes[
@@ -497,6 +505,19 @@ def run_excel_target_task(
                             enriched.insert(0, name, value)
                     destination.append(enriched)
                 finding_parts.append(enrich_findings(result.findings, **metadata))
+                cause_result = analyze_defect_causes(
+                    request.station_events_frame,
+                    request.station_parameters_frame,
+                    all_codes,
+                    source_type=source, code=code, scope=scope,
+                    cause_rules=cause_rules,
+                )
+                downtime_parts.append(cause_result.downtime_events)
+                exposure_parts.append(cause_result.product_exposure)
+                hypothesis_parts.append(cause_result.hypotheses)
+                cause_evidence_parts.append(cause_result.evidence)
+                finding_parts.append(cause_result.findings)
+                cause_summaries.append(cause_result.summary)
                 relationship_summaries.append({**metadata, **result.summary})
                 callbacks.on_progress(ProgressEvent(
                     "ANALYZING", None, target_index, len(targets),
@@ -520,6 +541,14 @@ def run_excel_target_task(
             "process_risk_curves.csv": pd.concat(risk_curve_parts, ignore_index=True) if risk_curve_parts else pd.DataFrame(),
             "process_interactions.csv": pd.concat(interaction_parts, ignore_index=True) if interaction_parts else pd.DataFrame(),
             "process_model_validation.csv": pd.concat(validation_parts, ignore_index=True) if validation_parts else pd.DataFrame(),
+            "downtime_events.csv": (
+                pd.concat(downtime_parts, ignore_index=True).drop_duplicates(
+                    ["analysis_scope", "downtime_id"], keep="first"
+                ) if downtime_parts else pd.DataFrame()
+            ),
+            "product_event_exposure.csv": pd.concat(exposure_parts, ignore_index=True) if exposure_parts else pd.DataFrame(),
+            "defect_cause_hypotheses.csv": pd.concat(hypothesis_parts, ignore_index=True) if hypothesis_parts else pd.DataFrame(),
+            "cause_evidence.csv": pd.concat(cause_evidence_parts, ignore_index=True) if cause_evidence_parts else pd.DataFrame(),
             "association_findings.csv": sort_findings(pd.concat(finding_parts, ignore_index=True)) if finding_parts else pd.DataFrame(),
             "extracted_defects.csv": empty_extracted,
             "spatial_clusters.csv": empty_result,
@@ -536,6 +565,12 @@ def run_excel_target_task(
         for filename, frame in frames_to_write.items():
             frame.to_csv(work_dir / filename, index=False, encoding="utf-8-sig")
         write_json(work_dir / "process_relationship_summary.json", relationship_summaries)
+        write_json(work_dir / "defect_cause_hypotheses.json", {
+            "summaries": cause_summaries,
+            "hypotheses": frames_to_write["defect_cause_hypotheses.csv"].astype(object).where(
+                pd.notna(frames_to_write["defect_cause_hypotheses.csv"]), None
+            ).to_dict("records"),
+        })
         write_json(
             work_dir / "association_findings.json",
             frames_to_write["association_findings.csv"].astype(object).where(
@@ -558,6 +593,9 @@ def run_excel_target_task(
             "analysis_mode": "excel_only", "enabled_scopes": list(request.selection.scopes),
             "analysis_selection": selection_payload, "image_analysis_executed": False,
             "relationship_targets": relationship_summaries,
+            "cause_analysis_targets": cause_summaries,
+            "downtime_event_count": len(frames_to_write["downtime_events.csv"]),
+            "cause_hypothesis_count": len(frames_to_write["defect_cause_hypotheses.csv"]),
             "top_association_findings": frames_to_write["association_findings.csv"].head(10).astype(object).where(
                 pd.notna(frames_to_write["association_findings.csv"].head(10)), None
             ).to_dict("records"),
@@ -585,6 +623,10 @@ def run_excel_target_task(
             "process_risk_curves": frames_to_write["process_risk_curves.csv"],
             "process_interactions": frames_to_write["process_interactions.csv"],
             "process_validation": frames_to_write["process_model_validation.csv"],
+            "downtime_events": frames_to_write["downtime_events.csv"],
+            "product_event_exposure": frames_to_write["product_event_exposure.csv"],
+            "cause_hypotheses": frames_to_write["defect_cause_hypotheses.csv"],
+            "cause_evidence": frames_to_write["cause_evidence.csv"],
             "association_findings": frames_to_write["association_findings.csv"],
         })
     except InterruptedError:

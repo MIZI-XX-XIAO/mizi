@@ -1,0 +1,37 @@
+# 本文件定义可配置的候选形成机理；内容是待验证假设，不是固定根因。
+defects:
+  "5S:5011":
+    mechanisms:
+      - id: stop_restart_material_state
+        cause: 停机或复产引起材料/输送状态变化
+        process_zone: 由停机暴露区间自动确定
+        evidence_types: [停机—缺陷, 复产—缺陷, 复产窗口—缺陷, 工站区间—缺陷]
+        missing_evidence: [PLC停机状态与原因, 停机期间环境与材料状态]
+        recommended_action: 核对高风险停机的PLC记录、受影响DMC及复产前后现场状态
+      - id: tension_synchronization
+        cause: 张力释放、突变或上下游不同步
+        process_zone: 张力控制及相邻输送区间
+        evidence_types: [参数事件—缺陷]
+        evidence_subjects: [张力异常]
+        missing_evidence: [高频张力曲线, 各轴同步速度]
+        recommended_action: 调取停机前后高频张力和各轴速度，检查松弛与瞬态峰值
+      - id: electrostatic_adhesion
+        cause: 静电引起材料吸附、粘连或展平异常
+        process_zone: 静电异常工站及后续首次贴合区间
+        evidence_types: [参数事件—缺陷]
+        evidence_subjects: [静电异常]
+        missing_evidence: [静电消除器状态, 接地和离子平衡记录]
+        recommended_action: 检查静电极性、离子平衡、接地和材料吸附状态
+      - id: material_change
+        cause: 材料批次或换料状态变化
+        process_zone: 放卷、接头及换料后的首段产品
+        evidence_types: [批次—缺陷]
+        evidence_subjects: [换料或批次变化]
+        missing_evidence: [卷料接头位置, 原材料批次性能数据]
+        recommended_action: 对比换料前后缺陷率并核对卷料接头和来料检验记录
+      - id: fixed_equipment_contact
+        cause: 固定位置辊系或设备接触影响
+        process_zone: 需结合缺陷图片位置和周期确定
+        evidence_types: [空间规律—缺陷]
+        missing_evidence: [缺陷坐标分布, 辊周长和设备接触位置]
+        recommended_action: 结合图片位置、周期和辊周长检查固定接触点

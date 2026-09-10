@@ -676,9 +676,12 @@ class MainWindow(QMainWindow):
     def _build_relationship_tab(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
-        title = QLabel("工艺参数关联分析")
+        title = QLabel("缺陷原因分析")
         title.setObjectName("pageTitle")
-        warning = QLabel("统计关联不等于因果关系；结论需结合工艺机理和受控实验验证。")
+        warning = QLabel(
+            "统计关联不等于因果关系。软件区分已观测事实、统计相关和候选机理；"
+            "Excel推断的停机与原因均需现场验证。"
+        )
         warning.setObjectName("warningBanner")
         warning.setWordWrap(True)
         controls = QGridLayout()
@@ -691,7 +694,7 @@ class MainWindow(QMainWindow):
         self.time_tolerance.setRange(0, 86400)
         self.time_tolerance.setValue(int(self.settings.value("process/tolerance_seconds", 60)))
         self.time_tolerance.setSuffix(" 秒")
-        self.relationship_analyze = QPushButton("分析工艺关联")
+        self.relationship_analyze = QPushButton("分析缺陷原因")
         self.relationship_analyze.setObjectName("primaryButton")
         self.relationship_analyze.clicked.connect(self._analyze_process_parameters)
         self.relationship_cancel = QPushButton("取消关联分析")
@@ -720,6 +723,10 @@ class MainWindow(QMainWindow):
         self.relationship_interactions = DataFrameTableWidget("process_interactions")
         self.relationship_validation = DataFrameTableWidget("process_model_validation")
         self.relationship_samples = DataFrameTableWidget("process_joined")
+        self.cause_hypotheses = DataFrameTableWidget("cause_hypotheses")
+        self.downtime_events = DataFrameTableWidget("downtime_events")
+        self.cause_evidence = DataFrameTableWidget("cause_evidence")
+        self.product_event_exposure = DataFrameTableWidget("product_event_exposure")
         self.code_space_widget = DataFrameTableWidget("code_space_associations")
         self.code_conflict_widget = DataFrameTableWidget("code_label_conflicts")
         self.trajectory_widget = DataFrameTableWidget("spatial_trajectories")
@@ -730,6 +737,10 @@ class MainWindow(QMainWindow):
         ):
             evidence_table.row_activated.connect(self._jump_from_pattern)
         tables = QTabWidget()
+        tables.addTab(self.cause_hypotheses, "原因假设")
+        tables.addTab(self.downtime_events, "停机时间线")
+        tables.addTab(self.cause_evidence, "原因证据")
+        tables.addTab(self.product_event_exposure, "产品事件暴露")
         tables.addTab(self.relationship_metrics, "统计与效应量")
         tables.addTab(self.relationship_bins, "区间缺陷率")
         tables.addTab(self.relationship_model, "模型重要性")
@@ -753,7 +764,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(controls)
         layout.addWidget(self.relationship_summary)
         layout.addWidget(relationship_views, 1)
-        self.tabs.addTab(page, "⑥ 关联分析")
+        self.tabs.addTab(page, "⑥ 缺陷原因与关联分析")
 
     def _build_excel_tab(self) -> None:
         self.excel_page = ExcelAnalysisPage(self.project_root)
@@ -1299,6 +1310,7 @@ class MainWindow(QMainWindow):
                     station_events_frame=self.station_workbook.events,
                     process_parameters_frame=self._inspected_parameters,
                     selection=selection, source_files=source_files,
+                    station_parameters_frame=self.station_workbook.parameters,
                     config_snapshot=dict(self.config_snapshot),
                     defect_catalog_path=catalog_path,
                 )
@@ -1463,6 +1475,10 @@ class MainWindow(QMainWindow):
         self._maybe_auto_relationship()
 
     def _show_process_result_frames(self, result: AnalysisResult) -> None:
+        self.cause_hypotheses.set_frame(result.frames.get("cause_hypotheses", pd.DataFrame()))
+        self.downtime_events.set_frame(result.frames.get("downtime_events", pd.DataFrame()))
+        self.cause_evidence.set_frame(result.frames.get("cause_evidence", pd.DataFrame()))
+        self.product_event_exposure.set_frame(result.frames.get("product_event_exposure", pd.DataFrame()))
         self.relationship_metrics.set_frame(result.frames.get("process_metrics", pd.DataFrame()))
         self.relationship_bins.set_frame(result.frames.get("process_bins", pd.DataFrame()))
         self.relationship_model.set_frame(result.frames.get("process_models", pd.DataFrame()))
@@ -1472,8 +1488,16 @@ class MainWindow(QMainWindow):
         self.relationship_interactions.set_frame(result.frames.get("process_interactions", pd.DataFrame()))
         self.relationship_validation.set_frame(result.frames.get("process_validation", pd.DataFrame()))
         self.relationship_samples.set_frame(result.frames.get("process_joined", pd.DataFrame()))
+        cause_summaries = result.summary.get("cause_analysis_targets", [])
         summaries = result.summary.get("relationship_targets", [])
-        if summaries:
+        if cause_summaries:
+            self.relationship_summary.setText("；".join(
+                f"{item['analysis_scope']} {item['canonical_code']}：{item['top_hypothesis']}"
+                f"（可关联{item['matched_route_count']}/{item['population_count']}，"
+                f"疑似停机{item['downtime_event_count']}次）"
+                for item in cause_summaries
+            ))
+        elif summaries:
             lines = [
                 f"{item['analysis_scope']} {item['target']}：匹配{item['matched_count']}/"
                 f"{item['product_count']}，正样本{item['defective_product_count']}，"
@@ -2088,7 +2112,10 @@ class MainWindow(QMainWindow):
             ):
                 enriched = frame.copy()
                 for name, value in reversed(tuple(metadata.items())):
-                    enriched.insert(0, name, value)
+                    if name in enriched:
+                        enriched[name] = value
+                    else:
+                        enriched.insert(0, name, value)
                 groups[key].append(enriched)
             groups["findings"].append(enrich_findings(result.findings, **metadata))
             summary_rows.append({**metadata, **result.summary})

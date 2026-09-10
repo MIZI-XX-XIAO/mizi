@@ -90,6 +90,9 @@ def test_excel_only_multiple_codes_use_full_population_and_selected_parameters(t
         "process_nonlinear_importance.csv", "process_nonlinear_effects.csv",
         "process_risk_curves.csv",
         "process_interactions.csv", "process_model_validation.csv",
+        "downtime_events.csv", "product_event_exposure.csv",
+        "defect_cause_hypotheses.csv", "defect_cause_hypotheses.json",
+        "cause_evidence.csv",
         "association_findings.csv", "association_findings.json",
     ):
         assert (result.output_dir / filename).is_file()

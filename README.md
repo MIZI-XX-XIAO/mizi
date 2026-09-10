@@ -12,7 +12,7 @@
 3. 执行分析：后台提取缺陷并显示进度、资源使用、预计时间和实时告警。
 4. 结果概览：分别查看代码规律、图片空间规律或二者联合规律，支持AOI/VI来源、单个或多个缺陷代码筛选。
 5. Excel分析：读取测试工作簿，统计State、Tolerance超差、判定冲突、趋势和分组质量。
-6. 关联分析：按综合证据分优先展示Top 10重点发现，并分析数值工艺参数与图片/AOI/VI缺陷之间的线性、非线性、阈值和双参数交互关系。
+6. 缺陷原因分析：从目标缺陷出发，识别Excel中的疑似停机、复产和工站区间暴露，按综合证据展示候选原因；数值参数的线性、非线性、阈值和双参数交互作为辅助证据。
 7. 图片复核：查看 A图、E图、差异图和Mask，支持检测框、同步缩放拖动、缺陷导航及局部原图。
 
 窗口会适配常见办公电脑分辨率和 Windows DPI 缩放，并记忆窗口、路径、表格列宽及复核布局。
@@ -102,6 +102,12 @@ uv run --frozen python -X utf8 -m pytest tests\test_real_images_e2e.py -q
 - `association_findings.csv`、`association_findings.json`
 - `process_joined.csv`（纯Excel目标任务）
 - `process_relationship_summary.json`
+- `downtime_events.csv`、`product_event_exposure.csv`
+- `defect_cause_hypotheses.csv`、`defect_cause_hypotheses.json`
+- `cause_evidence.csv`
+
+Excel推断的长时间无产出区间统一标记为“疑似停机”，不能代替PLC停机记录。
+原因假设会分别保存支持证据、反对证据、缺失证据和验证建议；未采集的温湿度等变量不会被补写成事实。
 
 执行Excel质量分析会生成：
 

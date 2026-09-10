@@ -105,6 +105,7 @@ def test_real_images_complete_gui_workflow(qtbot, tmp_path, monkeypatch) -> None
 
     window.process_edit.setText(str(process_path))
     window._analyze_process_parameters()
+    qtbot.waitUntil(lambda: window.relationship_thread is None, timeout=120_000)
     assert not errors
     assert not window.relationship_metrics.model.frame.empty
     assert not window.relationship_bins.model.frame.empty
