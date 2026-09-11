@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.process_relationships import analyze_process_relationships
 
@@ -52,6 +53,27 @@ def test_process_relationship_time_matching_marks_quality() -> None:
     result = analyze_process_relationships(products, defects, parameters, tolerance_seconds=15)
     assert result.summary["matched_count"] == 5
     assert set(result.joined["match_quality"]) == {"time_nearest"}
+
+
+def test_defect_cause_workflow_rejects_time_only_matching() -> None:
+    times = pd.date_range("2026-01-01", periods=5, freq="min")
+    products = pd.DataFrame({
+        "global_order": range(1, 6),
+        "production_timestamp": times,
+    })
+    parameters = pd.DataFrame({
+        "timestamp": times + pd.Timedelta(seconds=1),
+        "temperature": range(5),
+    })
+    defects = pd.DataFrame(columns=["global_order", "component_area"])
+
+    with pytest.raises(ValueError, match="不使用时间近似匹配"):
+        analyze_process_relationships(
+            products,
+            defects,
+            parameters,
+            require_exact_match=True,
+        )
 
 
 def test_process_relationship_limits_metrics_to_selected_parameters() -> None:

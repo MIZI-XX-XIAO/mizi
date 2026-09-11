@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -24,15 +25,45 @@ from src.result_views import ResultView  # noqa: E402
 from src.station_workbook import StationWorkbookData  # noqa: E402
 
 
+def test_cause_finding_opens_grouped_product_exposure_details(qtbot) -> None:
+    window = MainWindow(Path(__file__).resolve().parents[1])
+    qtbot.addWidget(window)
+    exposure = pd.DataFrame([{
+        "analysis_scope": "5S", "source_type": "VI_BLOCK", "canonical_code": "5011",
+        "route_match_status": "matched", "dmc_raw": f"DMC-{index}",
+        "experienced_downtime": index <= 2, "is_target_defect": index in {1, 4},
+        "target_time": pd.Timestamp("2026-08-01 10:00:00") + pd.Timedelta(seconds=index),
+        "downtime_ids": "STOP-1" if index <= 2 else "", "downtime_segments": "WP2—WP3",
+    } for index in range(1, 5)])
+    window.current_result = SimpleNamespace(frames={"product_event_exposure": exposure})
+    finding = pd.Series({
+        "detail_type": "cause_evidence", "requested_action": "samples",
+        "analysis_scope": "5S", "source_type": "VI_BLOCK", "canonical_code": "5011",
+        "sample_filter_field": "experienced_downtime", "sample_filter_operator": "truthy",
+        "sample_filter_value": True,
+    })
+
+    window._show_association_finding_detail(finding)
+
+    displayed = window.product_event_exposure.model.frame
+    assert len(displayed) == 4
+    assert displayed["符合当前发现条件"].sum() == 2
+    assert set(displayed["比较分组"]) == {"暴露组", "未满足条件组"}
+    assert window.relationship_details.currentWidget() is window.product_event_exposure
+    window.close()
+    window.deleteLater()
+
+
 def test_main_window_starts(qtbot) -> None:
     window = MainWindow(Path(__file__).resolve().parents[1])
     qtbot.addWidget(window)
     window.show()
     assert window.windowTitle() == "MEA多工站缺陷规律分析"
-    assert window.tabs.count() == 7
+    assert window.tabs.count() == 6
     assert isinstance(window.tabs, WorkbenchStack)
-    assert "Excel分析" in window.tabs.tabText(4)
-    assert "关联分析" in window.tabs.tabText(5)
+    assert all("Excel分析" not in window.tabs.tabText(index) for index in range(window.tabs.count()))
+    assert "关联分析" in window.tabs.tabText(4)
+    assert window.relationship_views.tabText(0) == "分析发现"
     assert window.workbench.navigation.buttons[0].isChecked()
     assert window.workbench.assistant.connection.text() == "未连接"
     assert "#091424" in window.styleSheet()
@@ -381,9 +412,13 @@ def test_workbench_navigation_and_responsive_layout(qtbot) -> None:
     window.resize(1600, 900)
     window.show()
 
-    window.workbench.navigation.buttons[5].click()
-    assert window.tabs.currentIndex() == 5
-    assert window.workbench.header.title.text() == "关联分析"
+    window.workbench.navigation.buttons[4].click()
+    assert window.tabs.currentIndex() == 4
+    assert window.workbench.header.title.text() == "缺陷原因"
+    assert not hasattr(window, "time_tolerance")
+    assert "时间匹配容差" not in {
+        label.text() for label in window.findChildren(QLabel)
+    }
 
     window.workbench.apply_responsive_layout(QSize(1366, 768))
     assert window.workbench.profile is LayoutProfile.COMPACT
@@ -414,7 +449,7 @@ def test_layout_profiles_cover_windows_scaling_targets() -> None:
     assert resolve_layout_profile(QSize(980, 620)) is LayoutProfile.TIGHT
 
 
-def test_compact_excel_page_does_not_set_oversized_window_hint(qtbot) -> None:
+def test_compact_relationship_page_does_not_set_oversized_window_hint(qtbot) -> None:
     window = MainWindow(Path(__file__).resolve().parents[1])
     qtbot.addWidget(window)
     window.resize(1280, 800)
@@ -425,8 +460,7 @@ def test_compact_excel_page_does_not_set_oversized_window_hint(qtbot) -> None:
 
     assert window.minimumSizeHint().height() < 800
     assert window.workbench.content.width() >= 1100
-    assert window.excel_page.result_tabs.usesScrollButtons()
-    assert window.excel_page.config_scroll.horizontalScrollBar().maximum() == 0
+    assert window.relationship_details.usesScrollButtons()
     assert not window.workbench.header.subtitle.isVisible()
     assert not window.workbench.header.task_context.isVisible()
     window.close()
@@ -443,7 +477,7 @@ def test_assistant_shell_is_offline_and_context_is_explicit(qtbot) -> None:
     assert assistant.connection.text() == "未连接"
     assert "不会发送" in assistant.findChild(QLabel, "privacyBanner").text()
 
-    window.tabs.setCurrentIndex(6)
+    window.tabs.setCurrentIndex(5)
     assert "图片复核" in assistant.context_label.text()
     assistant.clear_context()
     assert "尚未附加" in assistant.context_label.text()
@@ -532,33 +566,48 @@ def test_pattern_evidence_strip_and_fullscreen_review(qtbot, tmp_path: Path) -> 
     window.deleteLater()
 
 
-def test_excel_page_runs_analysis_in_background(qtbot, tmp_path: Path) -> None:
+def test_relationship_external_parameter_source_is_only_shown_when_needed(qtbot) -> None:
+    window = MainWindow(Path(__file__).resolve().parents[1])
+    qtbot.addWidget(window); window.show()
+    assert window.process_row.isHidden()
+    assert not window.relationship_analyze.isEnabled()
+
+    window.current_result = SimpleNamespace(summary={}, frames={})
+    window._update_relationship_source_controls()
+    assert not window.process_row.isHidden()
+    assert window.relationship_analyze.isEnabled()
+
+    window.station_workbook = SimpleNamespace()
+    window._inspected_parameters = pd.DataFrame({"dmc_raw": ["DMC-1"], "WP1.Speed": [3.0]})
+    window._update_relationship_source_controls()
+    assert window.process_row.isHidden()
+    assert "正在使用当前任务Excel" in window.relationship_source_status.text()
+    window.close(); window.deleteLater()
+
+
+def test_new_task_rejects_generic_single_table_excel(qtbot, tmp_path: Path) -> None:
     workbook = Workbook(); sheet = workbook.active; sheet.title = "Data"
     sheet.append(["Ident No.", "State", "Result.Force", "Tolerance"])
     sheet.append(["DMC-1", "OK", 30, "25 ... 70"])
-    sheet.append(["DMC-2", "NOK", 80, "25 ... 70"])
-    path = tmp_path / "gui_excel.xlsx"; workbook.save(path)
+    path = tmp_path / "generic.xlsx"; workbook.save(path)
 
     window = MainWindow(Path(__file__).resolve().parents[1])
-    qtbot.addWidget(window); window.show(); window.tabs.setCurrentIndex(4)
-    page = window.excel_page
-    page.workbook_edit.setText(str(path)); page.output_edit.setText(str(tmp_path))
-    page.task_name.setText("GUI Excel测试"); page.start_analysis()
-    qtbot.waitUntil(lambda: page.current_result is not None, timeout=15_000)
-    qtbot.waitUntil(lambda: page.thread is None, timeout=5_000)
-    assert page.current_result.summary["tolerance_nok_count"] == 1
-    assert window.current_excel_result is page.current_result
-    assert window.use_current_excel.isEnabled()
+    qtbot.addWidget(window)
+    errors = []
+    window._show_error = lambda title, exc: errors.append((title, str(exc)))
+    window.source_excel_edit.setText(str(path))
+
+    assert not window._inspect_products()
+    assert errors and "不支持该Excel格式" in errors[0][1]
+    assert "完整MES工站工作簿" in errors[0][1]
     window.close(); window.deleteLater()
 
 
 def test_station_task_builds_products_without_company_csv(qtbot, tmp_path: Path) -> None:
     dmc = "376W020BGO57424F00VF004AK"
-    workbook = Workbook(); data = workbook.active; data.title = "Data"
-    data.append(["Ident No.", "State", "Result.Force", "Tolerance"])
-    data.append([dmc, "OK", 30, "25 ... 70"])
-    query = workbook.create_sheet("Query parameter")
-    query.append(["Query parameter", None]); query.append(["Location(s)", "3003.10.1.1.6"])
+    workbook = Workbook(); data = workbook.active; data.title = "MS03106"
+    data.append(["Ident No.", "State", "Line", "ST", "SI", "FU", "WP", "TP", "Test Date"])
+    data.append([dmc, "OK", 3003, 10, 1, 1, 6, 1, "2025-04-21T21:00:00.000"])
     excel_path = tmp_path / "station.xlsx"; workbook.save(excel_path)
     for code in ("DA", "DE"):
         (tmp_path / f"{dmc}20250624{code}.png").write_bytes(b"index-only")

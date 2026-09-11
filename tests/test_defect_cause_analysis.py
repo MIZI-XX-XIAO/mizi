@@ -4,7 +4,7 @@ import pandas as pd
 
 from src.defect_cause_analysis import (
     analyze_defect_causes, build_cause_evidence, build_product_event_exposure,
-    detect_downtime_events,
+    detect_downtime_events, select_product_exposure_details,
 )
 
 
@@ -132,8 +132,77 @@ def test_repeated_pass_and_window_censorship_remain_explicit() -> None:
     ).iloc[0]
 
     assert exposure.observed_station_count == 2
+    assert exposure.route_match_status == "matched"
+    assert exposure.route_coverage_status == "partial_route"
     assert bool(exposure.left_censored)
     assert bool(exposure.right_censored)
+
+
+def test_products_before_cross_station_overlap_are_labeled_as_window_censored() -> None:
+    events = pd.DataFrame([
+        _event("DMC-MATCH", "35_wp1", "2026-08-01 10:00:00", 1),
+        _event("DMC-MATCH", "35_5s_aoi", "2026-08-01 10:10:00", 1),
+    ])
+    codes = pd.DataFrame([
+        {
+            "dmc_raw": "DMC-EARLY", "analysis_scope": "5S", "source_type": "VI_BLOCK",
+            "canonical_code": "", "code_status": "normal", "production_order": 1,
+            "test_date": pd.Timestamp("2026-08-01 10:50:00"),
+        },
+        {
+            "dmc_raw": " dmc-match ", "analysis_scope": "5S", "source_type": "VI_BLOCK",
+            "canonical_code": "5011", "code_status": "defect", "production_order": 2,
+            "test_date": pd.Timestamp("2026-08-01 11:00:00"),
+        },
+        {
+            "dmc_raw": "DMC-LATE", "analysis_scope": "5S", "source_type": "VI_BLOCK",
+            "canonical_code": "", "code_status": "normal", "production_order": 3,
+            "test_date": pd.Timestamp("2026-08-01 11:10:00"),
+        },
+    ])
+
+    result = build_product_event_exposure(
+        events, pd.DataFrame(), codes, pd.DataFrame(),
+        source_type="VI_BLOCK", code="5011", scope="5S",
+    ).set_index("dmc_raw")
+
+    assert result.loc[" dmc-match ", "route_match_status"] == "matched"
+    assert result.loc["DMC-EARLY", "route_match_status"] == "suspected_left_window_censored"
+    assert bool(result.loc["DMC-EARLY", "left_censored"])
+    assert result.loc["DMC-LATE", "route_match_status"] == "not_in_current_route_window"
+
+
+def test_cause_summary_reports_traceability_instead_of_dmc_match_failure() -> None:
+    events = pd.DataFrame([
+        _event("DMC-MATCH", "35_wp1", "2026-08-01 10:00:00", 1),
+        _event("DMC-MATCH", "35_wp2", "2026-08-01 10:00:03", 1),
+        _event("DMC-MATCH", "35_wp3", "2026-08-01 10:00:06", 1),
+        _event("DMC-MATCH", "35_wp4", "2026-08-01 10:00:09", 1),
+        _event("DMC-MATCH", "35_wp5", "2026-08-01 10:00:12", 1),
+        _event("DMC-MATCH", "35_5s_aoi", "2026-08-01 10:00:15", 1),
+    ])
+    codes = pd.DataFrame([
+        {
+            "dmc_raw": "DMC-EARLY", "analysis_scope": "5S", "source_type": "VI_BLOCK",
+            "canonical_code": "", "code_status": "normal", "production_order": 1,
+            "test_date": pd.Timestamp("2026-08-01 10:30:00"), "defect_name": "",
+        },
+        {
+            "dmc_raw": "DMC-MATCH", "analysis_scope": "5S", "source_type": "VI_BLOCK",
+            "canonical_code": "5011", "code_status": "defect", "production_order": 2,
+            "test_date": pd.Timestamp("2026-08-01 11:00:00"), "defect_name": "折皱",
+        },
+    ])
+
+    result = analyze_defect_causes(
+        events, pd.DataFrame(), codes,
+        source_type="VI_BLOCK", code="5011", scope="5S",
+    )
+
+    assert result.summary["current_window_traceable_count"] == 1
+    assert result.summary["complete_route_count"] == 1
+    assert result.summary["suspected_left_window_censored_count"] == 1
+    assert "窗口外产品不等于DMC匹配失败" in result.summary["warning"]
 
 
 def test_no_unexposed_control_is_kept_as_exploratory_evidence() -> None:
@@ -158,3 +227,27 @@ def test_no_unexposed_control_is_kept_as_exploratory_evidence() -> None:
     assert stop.unexposed_count == 0
     assert stop.evidence_level == "探索性线索"
     assert pd.isna(stop.risk_ratio)
+
+
+def test_cause_finding_selects_exact_exposed_and_comparison_products() -> None:
+    exposure = pd.DataFrame([
+        {
+            "analysis_scope": "5S", "source_type": "VI_BLOCK", "canonical_code": "5011",
+            "route_match_status": "matched", "dmc_raw": f"DMC-{index}",
+            "experienced_downtime": index <= 2, "is_target_defect": index in {1, 4},
+            "target_time": pd.Timestamp("2026-08-01 10:00:00") + pd.Timedelta(seconds=index),
+        }
+        for index in range(1, 5)
+    ])
+    finding = {
+        "analysis_scope": "5S", "source_type": "VI_BLOCK", "canonical_code": "5011",
+        "sample_filter_field": "experienced_downtime", "sample_filter_operator": "truthy",
+        "sample_filter_value": True,
+    }
+
+    details = select_product_exposure_details(exposure, finding)
+
+    assert len(details) == 4
+    assert details["matches_finding"].sum() == 2
+    assert set(details.loc[details["matches_finding"], "dmc_raw"]) == {"DMC-1", "DMC-2"}
+    assert set(details["comparison_group"]) == {"暴露组", "未满足条件组"}

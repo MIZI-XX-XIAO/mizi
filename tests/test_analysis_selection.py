@@ -89,7 +89,8 @@ def test_excel_only_multiple_codes_use_full_population_and_selected_parameters(t
     for filename in (
         "process_nonlinear_importance.csv", "process_nonlinear_effects.csv",
         "process_risk_curves.csv",
-        "process_interactions.csv", "process_model_validation.csv",
+        "process_interactions.csv", "process_interaction_regions.csv",
+        "process_model_validation.csv",
         "downtime_events.csv", "product_event_exposure.csv",
         "defect_cause_hypotheses.csv", "defect_cause_hypotheses.json",
         "cause_evidence.csv",

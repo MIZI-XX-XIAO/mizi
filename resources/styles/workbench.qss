@@ -185,6 +185,13 @@ QFrame#associationFindingCard {
 QLabel#associationFindingBadge { color: #55C9F2; font-weight: 700; font-size: 12pt; }
 QLabel#associationFindingType { color: #B9D8EA; font-weight: 600; }
 QLabel#associationFindingWarning { color: #F6C578; font-size: 9pt; }
+QLabel#associationFindingExplanation {
+    color: #C9DCE8;
+    background: #102238;
+    border: 1px solid #29445D;
+    border-radius: 4px;
+    padding: 10px;
+}
 QLabel#successBanner { color: #61D9CB; background: #0F302F; border: 1px solid #21665F; }
 QLabel#errorBanner { color: #FF91A3; background: #351A2A; border: 1px solid #773048; }
 QStatusBar#applicationStatusBar { color: #7186A5; background: #07101D; border-top: 1px solid #213654; }

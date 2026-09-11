@@ -28,6 +28,7 @@ class ProcessRelationshipResult:
     nonlinear_effects: pd.DataFrame
     risk_curves: pd.DataFrame
     interactions: pd.DataFrame
+    interaction_regions: pd.DataFrame
     model_validation: pd.DataFrame
     findings: pd.DataFrame
 
@@ -42,7 +43,8 @@ def _auc_score(y_true: np.ndarray, scores: np.ndarray) -> float | None:
 
 
 def _join_tables(products: pd.DataFrame, parameters: pd.DataFrame,
-                 tolerance_seconds: int) -> tuple[pd.DataFrame, str]:
+                 tolerance_seconds: int, *,
+                 require_exact_match: bool = False) -> tuple[pd.DataFrame, str]:
     for key in EXACT_KEYS:
         if key in products and key in parameters:
             numeric_columns = parameters.select_dtypes(include="number").columns.tolist()
@@ -54,6 +56,13 @@ def _join_tables(products: pd.DataFrame, parameters: pd.DataFrame,
             joined = products.merge(right, on=key, how="left", suffixes=("", "_process"), indicator=True)
             joined["match_quality"] = joined["_merge"].map({"both": "exact", "left_only": "unmatched"})
             return joined.drop(columns="_merge"), key
+
+    if require_exact_match:
+        expected = "/".join(EXACT_KEYS)
+        raise ValueError(
+            f"产品表与工艺参数表没有共同产品标识（{expected}）；"
+            "缺陷原因分析不使用时间近似匹配，请补充可精确关联的产品标识"
+        )
 
     product_time = next((key for key in TIME_KEYS if key in products), None)
     parameter_time = next((key for key in TIME_KEYS if key in parameters), None)
@@ -139,6 +148,8 @@ def analyze_process_relationships(
     parameters: pd.DataFrame,
     tolerance_seconds: int = 60,
     selected_parameters: tuple[str, ...] | list[str] | None = None,
+    *,
+    require_exact_match: bool = False,
 ) -> ProcessRelationshipResult:
     if "detection_type" in defects:
         defects = defects[defects["detection_type"] != "region_anomaly"].copy()
@@ -149,7 +160,12 @@ def analyze_process_relationships(
     if not parameter_report.is_valid:
         raise ValueError("工艺参数表校验失败：" + "；".join(parameter_report.errors))
 
-    joined, join_key = _join_tables(products, parameters, tolerance_seconds)
+    joined, join_key = _join_tables(
+        products,
+        parameters,
+        tolerance_seconds,
+        require_exact_match=require_exact_match,
+    )
     defect_counts = defects.groupby("global_order").size().rename("detected_defect_count")
     joined = joined.join(defect_counts, on="global_order")
     joined["detected_defect_count"] = joined["detected_defect_count"].fillna(0).astype(int)
@@ -247,6 +263,7 @@ def analyze_process_relationships(
         nonlinear_effects=nonlinear["nonlinear_effects"],
         risk_curves=nonlinear["risk_curves"],
         interactions=nonlinear["interactions"],
+        interaction_regions=nonlinear["interaction_regions"],
         model_validation=nonlinear["model_validation"],
         findings=nonlinear["findings"],
     )

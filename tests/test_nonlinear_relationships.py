@@ -48,6 +48,17 @@ def test_xor_relationship_is_reported_as_parameter_interaction() -> None:
     pair = set(result.interactions.iloc[0][["参数A", "参数B"]])
     assert pair == {"pressure", "temperature"}
     assert float(result.interactions.iloc[0]["AUC增益"]) > 0.03
+    high_risk = result.interaction_regions[
+        result.interaction_regions["是否高风险"].astype(bool)
+    ]
+    assert len(high_risk) >= 2
+    assert high_risk["高风险排名"].notna().all()
+    interaction_statement = result.findings.loc[
+        result.findings["detail_type"].eq("interaction"), "statement"
+    ].iloc[0]
+    assert "件中有" in interaction_statement
+    assert "总体为" in interaction_statement
+    assert "风险约" in interaction_statement
 
 
 def test_small_sample_only_returns_descriptive_results() -> None:

@@ -81,8 +81,7 @@ NAVIGATION_ITEMS = (
     NavigationItem("数据检查", "✓", "验证字段和图片路径"),
     NavigationItem("执行分析", "▶", "查看进度与实时告警"),
     NavigationItem("结果概览", "▦", "规律、预警与序列关系"),
-    NavigationItem("Excel分析", "▤", "测试数据、容差与质量诊断"),
-    NavigationItem("关联分析", "⌁", "工艺参数与缺陷关联"),
+    NavigationItem("缺陷原因", "⌁", "原因线索与工艺参数关联"),
     NavigationItem("图片复核", "▣", "对比图像与缺陷区域"),
 )
 

@@ -28,7 +28,9 @@ DOWNTIME_COLUMNS = [
 ]
 EXPOSURE_COLUMNS = [
     "analysis_scope", "source_type", "canonical_code", "dmc_raw", "is_target_defect",
-    "target_time", "route_first_time", "route_last_time", "route_match_status",
+    "source_event_time", "target_time", "route_first_time", "route_last_time",
+    "route_match_status", "route_coverage_status", "route_match_reason",
+    "linkage_method", "route_data_start", "route_data_end",
     "observed_station_count", "left_censored", "right_censored",
     "experienced_downtime", "downtime_count", "longest_downtime_seconds",
     "downtime_ids", "downtime_segments", "post_restart_90_seconds",
@@ -42,12 +44,15 @@ EVIDENCE_COLUMNS = [
     "exposed_defects", "unexposed_defects", "exposed_rate", "unexposed_rate",
     "risk_ratio", "risk_difference", "ci95_low", "ci95_high", "p_value",
     "evidence_level", "evidence_score", "data_quality", "warning",
+    "analysis_question", "discovery_method", "interpretation", "limitations",
+    "recommended_action", "sample_filter_field", "sample_filter_operator",
+    "sample_filter_value", "sample_filter_min", "sample_filter_max", "is_effective",
 ]
 HYPOTHESIS_COLUMNS = [
     "hypothesis_id", "analysis_scope", "source_type", "canonical_code",
     "defect_name", "candidate_cause", "process_zone", "conclusion",
     "evidence_level", "evidence_score", "supporting_evidence", "counter_evidence",
-    "missing_evidence", "recommended_action", "warning",
+    "supporting_evidence_ids", "missing_evidence", "recommended_action", "warning",
 ]
 FINDING_COLUMNS = [
     "finding_id", "finding_type", "analysis_scope", "target", "source_type",
@@ -55,6 +60,9 @@ FINDING_COLUMNS = [
     "evidence_level", "effect_strength", "sample_size", "positive_count",
     "negative_count", "risk_ratio", "lift", "validation_auc", "stability",
     "data_quality", "warning", "detail_type", "detail_key",
+    "analysis_question", "discovery_method", "interpretation", "limitations",
+    "recommended_action", "sample_filter_field", "sample_filter_operator",
+    "sample_filter_value", "sample_filter_min", "sample_filter_max", "is_effective",
 ]
 
 
@@ -102,6 +110,13 @@ def _scope_frame(frame: pd.DataFrame, scope: str) -> pd.DataFrame:
         return ""
     mask = frame["station_id"].map(station_scope).astype(str).eq(str(scope))
     return frame.loc[mask].copy()
+
+
+def _dmc_key(value: Any) -> str:
+    """Normalize formatting only; never infer that two different DMCs are one product."""
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip().upper()
 
 
 def _normal_cycle_seconds(times: pd.Series) -> float:
@@ -232,14 +247,16 @@ def _population(code_events: pd.DataFrame, source_type: str, code: str,
         code_events["source_type"].astype(str).eq(source_type)
         & code_events["analysis_scope"].astype(str).eq(scope)
     ].sort_values("production_order", na_position="last", kind="stable")
-    scoped = scoped.drop_duplicates("dmc_raw", keep="last").copy()
+    scoped = scoped.copy()
+    scoped["_dmc_key"] = scoped["dmc_raw"].map(_dmc_key)
+    scoped = scoped.drop_duplicates("_dmc_key", keep="last").copy()
     target_dmcs = set(code_events.loc[
         code_events["source_type"].astype(str).eq(source_type)
         & code_events["analysis_scope"].astype(str).eq(scope)
         & code_events["canonical_code"].astype(str).eq(code)
         & code_events["code_status"].isin(["defect", "state_code_conflict"]), "dmc_raw"
-    ].astype(str))
-    scoped["is_target_defect"] = scoped["dmc_raw"].astype(str).isin(target_dmcs)
+    ].map(_dmc_key))
+    scoped["is_target_defect"] = scoped["_dmc_key"].isin(target_dmcs)
     return scoped
 
 
@@ -290,34 +307,37 @@ def build_product_event_exposure(
     route = _scope_frame(station_events, scope)
     route = route[route["station_id"].astype(str).str.contains(r"_wp\d+$|_aoi$", regex=True)].copy()
     route["dmc_raw"] = route["dmc_raw"].astype(str)
+    route["_dmc_key"] = route["dmc_raw"].map(_dmc_key)
     route["_time"] = pd.to_datetime(route.get("test_date"), errors="coerce")
     route = route.dropna(subset=["_time"]).sort_values("_time", kind="stable")
     route["_rank"] = route["station_id"].map(_route_rank)
-    route_times = route.pivot_table(index="dmc_raw", columns="_rank", values="_time", aggfunc="last")
-    route_groups = {str(dmc): group for dmc, group in route.groupby(route["dmc_raw"].astype(str))}
+    route_times = route.pivot_table(index="_dmc_key", columns="_rank", values="_time", aggfunc="last")
+    route_groups = {str(dmc): group for dmc, group in route.groupby("_dmc_key")}
+    route_data_start = route["_time"].min() if not route.empty else pd.NaT
+    route_data_end = route["_time"].max() if not route.empty else pd.NaT
 
     anchor = route[route["station_id"].astype(str).str.endswith("_aoi")]
-    anchor_times = anchor.groupby(anchor["dmc_raw"].astype(str))["_time"].last().sort_values()
+    anchor_times = anchor.groupby("_dmc_key")["_time"].last().sort_values()
     anchor_order = anchor_times.reset_index(drop=False)
     anchor_order["_output_order"] = range(1, len(anchor_order) + 1)
-    anchor_order_map = dict(zip(anchor_order["dmc_raw"].astype(str), anchor_order["_output_order"]))
+    anchor_order_map = dict(zip(anchor_order["_dmc_key"].astype(str), anchor_order["_output_order"]))
     # A process signal may support a cause only when it precedes the target
     # inspection for that DMC. This prevents downstream measurements from being
     # presented as explanatory variables.
     parameter_history = station_parameters.copy()
     if not parameter_history.empty and {"dmc_raw", "test_date"}.issubset(parameter_history.columns):
         fallback_times = dict(zip(
-            population["dmc_raw"].astype(str),
+            population["_dmc_key"].astype(str),
             pd.to_datetime(population["test_date"], errors="coerce"),
         ))
         reference_times = {
             dmc: anchor_times.get(dmc, fallback_times.get(dmc, pd.NaT))
-            for dmc in population["dmc_raw"].astype(str)
+            for dmc in population["_dmc_key"].astype(str)
         }
         parameter_history["_parameter_time"] = pd.to_datetime(
             parameter_history["test_date"], errors="coerce"
         )
-        parameter_history["_reference_time"] = parameter_history["dmc_raw"].astype(str).map(reference_times)
+        parameter_history["_reference_time"] = parameter_history["dmc_raw"].map(_dmc_key).map(reference_times)
         parameter_history = parameter_history[
             parameter_history["_reference_time"].notna()
             & parameter_history["_parameter_time"].le(parameter_history["_reference_time"])
@@ -337,12 +357,15 @@ def build_product_event_exposure(
     rows: list[dict[str, Any]] = []
     for item in population.to_dict("records"):
         dmc = str(item.get("dmc_raw", ""))
-        group = route_groups.get(dmc, pd.DataFrame())
+        dmc_key = str(item.get("_dmc_key", _dmc_key(dmc)))
+        group = route_groups.get(dmc_key, pd.DataFrame())
         observed = int(group["station_id"].nunique()) if not group.empty else 0
         first = group["_time"].min() if observed else pd.NaT
         last = group["_time"].max() if observed else pd.NaT
-        target_time = anchor_times.get(dmc, pd.to_datetime(item.get("test_date"), errors="coerce"))
-        ranks = route_times.loc[dmc].dropna().sort_index() if dmc in route_times.index else pd.Series(dtype="datetime64[ns]")
+        source_event_time = pd.to_datetime(item.get("test_date"), errors="coerce")
+        target_time = anchor_times.get(dmc_key, source_event_time)
+        ranks = route_times.loc[dmc_key].dropna().sort_index() if dmc_key in route_times.index else pd.Series(dtype="datetime64[ns]")
+        complete_route = set(range(1, 7)).issubset(set(ranks.index))
         stop_ids: list[str] = []
         durations: list[float] = []
         segments: list[str] = []
@@ -361,7 +384,7 @@ def build_product_event_exposure(
                     segments.append(segment)
             if pd.notna(target_time) and target_time >= restart:
                 restart_seconds.append(float((target_time - restart).total_seconds()))
-                product_order = anchor_order_map.get(dmc)
+                product_order = anchor_order_map.get(dmc_key)
                 if product_order is not None:
                     before = int(anchor_order.loc[anchor_order["_time"].lt(restart), "_output_order"].max()) \
                         if anchor_order["_time"].lt(restart).any() else 0
@@ -380,8 +403,19 @@ def build_product_event_exposure(
         rows.append({
             "analysis_scope": scope, "source_type": source_type, "canonical_code": code,
             "dmc_raw": dmc, "is_target_defect": bool(item["is_target_defect"]),
-            "target_time": target_time, "route_first_time": first, "route_last_time": last,
+            "source_event_time": source_event_time, "target_time": target_time,
+            "route_first_time": first, "route_last_time": last,
             "route_match_status": "matched" if observed else "unmatched",
+            "route_coverage_status": (
+                "complete_route" if complete_route else "partial_route" if observed else "unclassified"
+            ),
+            "route_match_reason": (
+                "相同DMC在WP1—WP5和AOI均有记录" if complete_route
+                else "相同DMC仅在当前数据窗口的部分工站有记录" if observed
+                else "当前导出的上游工站时间窗口内没有该DMC记录"
+            ),
+            "linkage_method": "exact_dmc" if observed else "none",
+            "route_data_start": route_data_start, "route_data_end": route_data_end,
             "observed_station_count": observed,
             "left_censored": bool(observed and 1 not in ranks.index),
             "right_censored": bool(observed and 6 not in ranks.index),
@@ -397,7 +431,86 @@ def build_product_event_exposure(
             "speed_anomaly": dmc in flags["speed"], "tension_anomaly": dmc in flags["tension"],
             "static_anomaly": dmc in flags["static"],
         })
-    return pd.DataFrame(rows, columns=EXPOSURE_COLUMNS)
+    result = pd.DataFrame(rows, columns=EXPOSURE_COLUMNS)
+    if result.empty:
+        return result
+
+    # A same-clock-time export from every station is not a same-product cohort on
+    # a pipeline.  Infer only the obvious left boundary from the first VI/source
+    # event that has an exact upstream DMC; do not manufacture time-nearest links.
+    matched = result["route_match_status"].eq("matched")
+    matched_source_times = pd.to_datetime(
+        result.loc[matched, "source_event_time"], errors="coerce"
+    ).dropna()
+    if not matched_source_times.empty:
+        overlap_start = matched_source_times.min()
+        source_times = pd.to_datetime(result["source_event_time"], errors="coerce")
+        suspected_left = ~matched & source_times.notna() & source_times.lt(overlap_start)
+        result.loc[suspected_left, "route_match_status"] = "suspected_left_window_censored"
+        result.loc[suspected_left, "route_coverage_status"] = "outside_current_route_window"
+        result.loc[suspected_left, "route_match_reason"] = (
+            "目标检出早于本数据中首个可跨工站精确追溯产品；所需上游记录疑似位于导出开始时间之前"
+        )
+        result.loc[suspected_left, "left_censored"] = True
+    remaining = result["route_match_status"].eq("unmatched")
+    result.loc[remaining, "route_match_status"] = "not_in_current_route_window"
+    result.loc[remaining, "route_coverage_status"] = "not_in_current_route_window"
+    result.loc[remaining, "route_match_reason"] = (
+        "当前上游数据窗口没有相同DMC记录；需检查窗口边界、返工/乱序记录或数据完整性"
+    )
+    return result
+
+
+def select_product_exposure_details(
+    exposure: pd.DataFrame, finding: pd.Series | dict[str, Any],
+) -> pd.DataFrame:
+    """Return the exact exposed and comparison products behind one cause finding."""
+    if exposure.empty:
+        return exposure.copy()
+    item = dict(finding)
+    result = exposure.copy()
+    for finding_key, exposure_key in (
+        ("analysis_scope", "analysis_scope"),
+        ("source_type", "source_type"),
+        ("canonical_code", "canonical_code"),
+    ):
+        value = str(item.get(finding_key, "") or "").strip()
+        if value and exposure_key in result:
+            result = result[result[exposure_key].astype(str).eq(value)]
+    if "route_match_status" in result:
+        result = result[result["route_match_status"].eq("matched")]
+    field = str(item.get("sample_filter_field", "") or "")
+    operator = str(item.get("sample_filter_operator", "") or "")
+    if not field or field not in result:
+        return result.iloc[0:0].copy()
+    if operator == "truthy":
+        condition = result[field].fillna(False).astype(bool)
+    elif operator == "equals":
+        condition = result[field].astype(str).eq(str(item.get("sample_filter_value", "")))
+    elif operator == "contains_token":
+        token = str(item.get("sample_filter_value", ""))
+        condition = result[field].fillna("").astype(str).map(lambda value: token in value.split(";"))
+    elif operator == "range_left_open":
+        numeric = pd.to_numeric(result[field], errors="coerce")
+        minimum = pd.to_numeric(pd.Series([item.get("sample_filter_min")]), errors="coerce").iloc[0]
+        maximum = pd.to_numeric(pd.Series([item.get("sample_filter_max")]), errors="coerce").iloc[0]
+        condition = numeric.gt(minimum) if pd.notna(minimum) else pd.Series(True, index=result.index)
+        if pd.notna(maximum):
+            condition &= numeric.le(maximum)
+    else:
+        return result.iloc[0:0].copy()
+    result.insert(0, "comparison_group", np.where(condition, "暴露组", "未满足条件组"))
+    result.insert(1, "matches_finding", condition.to_numpy())
+    result["_group_order"] = (~condition).astype(int)
+    sort_columns = ["_group_order"]
+    ascending = [True]
+    if "is_target_defect" in result:
+        sort_columns.append("is_target_defect"); ascending.append(False)
+    if "target_time" in result:
+        sort_columns.append("target_time"); ascending.append(True)
+    return result.sort_values(sort_columns, ascending=ascending, kind="stable").drop(
+        columns="_group_order"
+    ).reset_index(drop=True)
 
 
 def _fisher_p(a: int, b: int, c: int, d: int) -> float:
@@ -408,9 +521,54 @@ def _fisher_p(a: int, b: int, c: int, d: int) -> float:
         return np.nan
 
 
+def _evidence_explanation(evidence_type: str, label: str, code: str) -> tuple[str, str, str, str]:
+    question = f"{label}是否与{code}缺陷有关？"
+    if evidence_type == "停机—缺陷":
+        method = (
+            "先按工站Test Date计算正常节拍中位数；相邻记录空档同时超过30秒和正常节拍10倍时"
+            "标记为疑似停机，三个以上工站同步时提高可信度。随后仅使用缺陷检出前的事件，"
+            "在当前数据窗口内能按相同DMC追溯的产品中，比较经历疑似停机与未经历疑似停机的产品。"
+        )
+        limitation = (
+            "Excel中的无产出空档只能推断疑似停机，仍缺少PLC停机状态、停机原因和现场记录；"
+            "相同时间范围导出的上下游数据会因产线传输延迟而在边界处无法追溯。"
+        )
+        action = "核对高风险时间段的PLC停机日志，并按同一口径复算对应DMC。"
+    elif evidence_type in {"复产—缺陷", "复产窗口—缺陷"}:
+        method = (
+            "以疑似停机后的首个工站输出作为复产点，按产品检出时间和复产后产品序号建立窗口，"
+            "比较窗口内外的缺陷率。所有事件必须早于缺陷检出。"
+        )
+        limitation = "复产点来自Excel工站输出，不等同于PLC启动时刻；实际节拍变化会使时间窗与件数窗不同。"
+        action = "核对复产后逐件节拍、设备速度及前30件产品，确认风险持续到第几件。"
+    elif evidence_type == "工站区间—缺陷":
+        method = (
+            "根据同一DMC在相邻WP的过站时间，判断疑似停机开始与复产是否落在两个工站之间，"
+            "再在当前数据窗口可追溯产品中比较该区间暴露组与其他产品的缺陷率。"
+        )
+        limitation = "区间定位表示产品停机时所处位置，不等于缺陷一定在该区间形成。"
+        action = "调取该区间设备状态、张力和材料路径记录，并对相关DMC进行现场追溯。"
+    elif evidence_type == "停机时长—缺陷":
+        method = "按每件产品经历的最长疑似停机时长分组，再与当前数据窗口内其余可追溯产品比较缺陷率。"
+        limitation = "停机时长来自无产出间隔，且可能与批次、换料和复产状态同时发生。"
+        action = "按多个停机时长做受控验证，并保持材料、速度和张力条件一致。"
+    elif evidence_type == "批次—缺陷":
+        method = "识别材料或批次字段变化，并比较换料/换批后首段产品与其他产品的缺陷率。"
+        limitation = "表格只能识别字段变化，不能确认卷料接头位置或来料性能差异。"
+        action = "核对卷料接头、原材料批次和来料检验记录。"
+    else:
+        method = f"从缺陷检出前的工站参数中识别{label}事件，并比较有无该事件的产品缺陷率。"
+        limitation = "低频Excel采样可能遗漏瞬态变化，统计异常也不等同于设备异常。"
+        action = f"调取{label}的高频原始曲线并开展单因子验证。"
+    return question, method, limitation, action
+
+
 def _association_row(frame: pd.DataFrame, column: str, label: str, evidence_type: str,
                      index: int, scope: str, source_type: str, code: str,
-                     data_quality: float) -> dict[str, Any]:
+                     data_quality: float, *, sample_filter_field: str | None = None,
+                     sample_filter_operator: str = "truthy", sample_filter_value: Any = True,
+                     sample_filter_min: float | None = None,
+                     sample_filter_max: float | None = None) -> dict[str, Any]:
     usable = frame.dropna(subset=[column, "is_target_defect"])
     exposed = usable[column].astype(bool)
     target = usable["is_target_defect"].astype(bool)
@@ -442,8 +600,24 @@ def _association_row(frame: pd.DataFrame, column: str, label: str, evidence_type
     score = round(100 * (0.45 * magnitude + 0.30 * support + 0.25 * data_quality), 1)
     statement = (
         f"{label}产品的{code}缺陷率为{exposed_rate:.1%}（{a}/{exposed_total}），"
-        f"对照产品为{unexposed_rate:.1%}（{c}/{unexposed_total}），风险比{rr:.2f}。"
-    ) if pd.notna(rr) and np.isfinite(rr) else f"{label}的对照样本不足，暂不能稳定估计风险比。"
+        f"未满足该条件组为{unexposed_rate:.1%}（{c}/{unexposed_total}），风险比{rr:.2f}。"
+    ) if pd.notna(rr) and np.isfinite(rr) else (
+        f"{label}产品的{code}缺陷率为{exposed_rate:.1%}（{a}/{exposed_total}），"
+        f"未满足该条件组为0.0%（0/{unexposed_total}），风险比趋于无穷。"
+        if np.isinf(rr) else f"{label}的对照样本不足，暂不能稳定估计风险比。"
+    )
+    question, method, limitation, action = _evidence_explanation(evidence_type, label, code)
+    if pd.notna(rr):
+        direction = "高于" if rr > 1 else "低于" if rr < 1 else "接近"
+        significance = f"Fisher检验P={p_value:.4g}" if pd.notna(p_value) else "Fisher检验不可用"
+        interpretation = (
+            f"该条件组缺陷率{direction}未满足条件组，风险差{exposed_rate - unexposed_rate:.1%}；"
+            f"95%置信区间为{low:.2f}～{high:.2f}，{significance}。"
+            "这支持统计关联判断，但不能单独确认物理根因。"
+        )
+    else:
+        interpretation = "两组样本不完整，当前只能保留为待补充数据的线索。"
+    effective = bool(exposed_total and unexposed_total and (a + c) and pd.notna(rr))
     return {
         "evidence_id": f"CAUSE-{index:04d}", "analysis_scope": scope,
         "source_type": source_type, "canonical_code": code, "evidence_type": evidence_type,
@@ -455,6 +629,14 @@ def _association_row(frame: pd.DataFrame, column: str, label: str, evidence_type
         "ci95_low": low, "ci95_high": high, "p_value": p_value,
         "evidence_level": level, "evidence_score": score, "data_quality": data_quality,
         "warning": "统计关联，尚未证明根本原因",
+        "analysis_question": question, "discovery_method": method,
+        "interpretation": interpretation, "limitations": limitation,
+        "recommended_action": action,
+        "sample_filter_field": sample_filter_field or column,
+        "sample_filter_operator": sample_filter_operator,
+        "sample_filter_value": sample_filter_value,
+        "sample_filter_min": sample_filter_min, "sample_filter_max": sample_filter_max,
+        "is_effective": effective,
     }
 
 
@@ -500,7 +682,7 @@ def build_cause_evidence(exposure: pd.DataFrame, *, scope: str, source_type: str
             "analysis_scope": scope, "source_type": source_type, "canonical_code": code,
             "evidence_type": "已观测事实—时间聚集", "subject": "缺陷时间聚集",
             "statement": (
-                f"在{len(matched)}件可关联产品中观测到{observed_count}件{code}；"
+                f"在{len(matched)}件当前数据窗口可追溯产品中观测到{observed_count}件{code}；"
                 f"任意5分钟窗口内最多{max_five_minutes}件。"
             ),
             "exposed_count": len(matched), "unexposed_count": 0,
@@ -509,6 +691,14 @@ def build_cause_evidence(exposure: pd.DataFrame, *, scope: str, source_type: str
             "risk_ratio": np.nan, "risk_difference": np.nan, "ci95_low": np.nan,
             "ci95_high": np.nan, "p_value": np.nan, "evidence_level": "已观测事实",
             "evidence_score": 100.0, "data_quality": quality, "warning": observation_warning,
+            "analysis_question": f"{code}是否在时间上集中出现？",
+            "discovery_method": "按缺陷检出时间排序，滑动统计任意5分钟窗口内的目标缺陷数量。",
+            "interpretation": "时间聚集用于定位需要核查的生产事件窗口，本身不能说明形成原因。",
+            "limitations": "未与生产事件或工艺参数对照前，只能作为描述性事实。",
+            "recommended_action": "检查缺陷密集时间段对应的停机、复产、换料和设备日志。",
+            "sample_filter_field": "is_target_defect", "sample_filter_operator": "truthy",
+            "sample_filter_value": True, "sample_filter_min": np.nan,
+            "sample_filter_max": np.nan, "is_effective": observed_count > 0,
         },
         {
             "evidence_id": f"EVD-{scope}-{code}-{len(rows) + 2:03d}",
@@ -521,6 +711,14 @@ def build_cause_evidence(exposure: pd.DataFrame, *, scope: str, source_type: str
             "risk_ratio": np.nan, "risk_difference": np.nan, "ci95_low": np.nan,
             "ci95_high": np.nan, "p_value": np.nan, "evidence_level": "已观测事实",
             "evidence_score": 100.0, "data_quality": quality, "warning": observation_warning,
+            "analysis_question": f"{code}是否连续出现在相邻产品中？",
+            "discovery_method": "按检出时间排列当前数据窗口内可追溯的产品，计算目标缺陷连续出现的最长段。",
+            "interpretation": "连续异常可提示设备或材料状态持续存在，但不能直接定位工站。",
+            "limitations": "时间窗截断或产品记录缺失可能切断真实连续段。",
+            "recommended_action": "追溯连续异常段首尾产品及其过站、停机和参数记录。",
+            "sample_filter_field": "is_target_defect", "sample_filter_operator": "truthy",
+            "sample_filter_value": True, "sample_filter_min": np.nan,
+            "sample_filter_max": np.nan, "is_effective": longest_run > 1,
         },
     ])
     segments = sorted({
@@ -535,6 +733,8 @@ def build_cause_evidence(exposure: pd.DataFrame, *, scope: str, source_type: str
         rows.append(_association_row(
             matched, column, f"{segment}区间经历疑似停机", "工站区间—缺陷",
             len(rows) + 1, scope, source_type, code, quality,
+            sample_filter_field="downtime_segments",
+            sample_filter_operator="contains_token", sample_filter_value=segment,
         ))
     for bucket in ("1-10", "11-30", "31-100"):
         column = f"_bucket_{bucket}"
@@ -542,19 +742,24 @@ def build_cause_evidence(exposure: pd.DataFrame, *, scope: str, source_type: str
         rows.append(_association_row(
             matched, column, f"复产后第{bucket}件", "复产窗口—缺陷",
             len(rows) + 1, scope, source_type, code, quality,
+            sample_filter_field="restart_bucket", sample_filter_operator="equals",
+            sample_filter_value=bucket,
         ))
     duration_groups = [
-        ("0-180秒", matched["experienced_downtime"] & matched["longest_downtime_seconds"].le(180)),
+        ("0-180秒", matched["experienced_downtime"] & matched["longest_downtime_seconds"].le(180), 0, 180),
         ("181-600秒", matched["longest_downtime_seconds"].gt(180)
-         & matched["longest_downtime_seconds"].le(600)),
-        (">600秒", matched["longest_downtime_seconds"].gt(600)),
+         & matched["longest_downtime_seconds"].le(600), 180, 600),
+        (">600秒", matched["longest_downtime_seconds"].gt(600), 600, np.nan),
     ]
-    for label, values in duration_groups:
+    for label, values, minimum, maximum in duration_groups:
         column = f"_duration_{len(rows)}"
         matched[column] = values
         rows.append(_association_row(
             matched, column, f"最长疑似停机{label}", "停机时长—缺陷",
             len(rows) + 1, scope, source_type, code, quality,
+            sample_filter_field="longest_downtime_seconds",
+            sample_filter_operator="range_left_open", sample_filter_min=minimum,
+            sample_filter_max=maximum,
         ))
     return pd.DataFrame(rows, columns=EVIDENCE_COLUMNS)
 
@@ -609,6 +814,7 @@ def build_hypotheses(evidence: pd.DataFrame, rules: dict[str, Any], *, scope: st
             "candidate_cause": cause, "process_zone": process_zone, "conclusion": conclusion,
             "evidence_level": level, "evidence_score": score,
             "supporting_evidence": support_text, "counter_evidence": counter_text,
+            "supporting_evidence_ids": ";".join(supporting["evidence_id"].astype(str)),
             "missing_evidence": "；".join(map(str, mechanism.get("missing_evidence") or [])),
             "recommended_action": str(mechanism.get("recommended_action", "结合现场工艺与受控实验验证")),
             "warning": "候选机理，不是已确认根本原因",
@@ -621,6 +827,8 @@ def build_hypotheses(evidence: pd.DataFrame, rules: dict[str, Any], *, scope: st
 def _findings(evidence: pd.DataFrame, hypotheses: pd.DataFrame, *, target: str) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for item in evidence.to_dict("records"):
+        if not bool(item.get("is_effective", False)):
+            continue
         rows.append({
             "finding_id": item["evidence_id"], "finding_type": item["evidence_type"],
             "analysis_scope": item["analysis_scope"], "target": target,
@@ -636,8 +844,21 @@ def _findings(evidence: pd.DataFrame, hypotheses: pd.DataFrame, *, target: str) 
             "risk_ratio": item["risk_ratio"], "lift": np.nan, "validation_auc": np.nan,
             "stability": np.nan, "data_quality": item["data_quality"], "warning": item["warning"],
             "detail_type": "cause_evidence", "detail_key": item["evidence_id"],
+            "analysis_question": item.get("analysis_question", ""),
+            "discovery_method": item.get("discovery_method", ""),
+            "interpretation": item.get("interpretation", ""),
+            "limitations": item.get("limitations", ""),
+            "recommended_action": item.get("recommended_action", ""),
+            "sample_filter_field": item.get("sample_filter_field", ""),
+            "sample_filter_operator": item.get("sample_filter_operator", ""),
+            "sample_filter_value": item.get("sample_filter_value", ""),
+            "sample_filter_min": item.get("sample_filter_min", np.nan),
+            "sample_filter_max": item.get("sample_filter_max", np.nan),
+            "is_effective": True,
         })
     for item in hypotheses.to_dict("records"):
+        if float(item.get("evidence_score", 0) or 0) <= 0:
+            continue
         rows.append({
             "finding_id": item["hypothesis_id"], "finding_type": "机理假设",
             "analysis_scope": item["analysis_scope"], "target": target,
@@ -649,6 +870,15 @@ def _findings(evidence: pd.DataFrame, hypotheses: pd.DataFrame, *, target: str) 
             "risk_ratio": np.nan, "lift": np.nan, "validation_auc": np.nan,
             "stability": np.nan, "data_quality": np.nan, "warning": item["warning"],
             "detail_type": "cause_hypothesis", "detail_key": item["hypothesis_id"],
+            "analysis_question": f"候选机理“{item['candidate_cause']}”是否能够解释当前缺陷？",
+            "discovery_method": f"汇总与该机理相关的统计证据：{item['supporting_evidence']}",
+            "interpretation": f"{item['conclusion']}\n反对证据：{item['counter_evidence']}",
+            "limitations": f"仍缺少：{item['missing_evidence']}",
+            "recommended_action": item["recommended_action"],
+            "sample_filter_field": "", "sample_filter_operator": "",
+            "sample_filter_value": item.get("supporting_evidence_ids", ""),
+            "sample_filter_min": np.nan, "sample_filter_max": np.nan,
+            "is_effective": True,
         })
     return pd.DataFrame(rows, columns=FINDING_COLUMNS).sort_values(
         "evidence_score", ascending=False, ignore_index=True,
@@ -687,12 +917,32 @@ def analyze_defect_causes(
     target = f"{source_type}:{code}"
     findings = _findings(evidence, hypotheses, target=target)
     matched = exposure["route_match_status"].eq("matched") if not exposure.empty else pd.Series(dtype=bool)
+    complete = exposure["route_coverage_status"].eq("complete_route") \
+        if not exposure.empty and "route_coverage_status" in exposure else pd.Series(dtype=bool)
+    partial = exposure["route_coverage_status"].eq("partial_route") \
+        if not exposure.empty and "route_coverage_status" in exposure else pd.Series(dtype=bool)
+    suspected_left = exposure["route_match_status"].eq("suspected_left_window_censored") \
+        if not exposure.empty else pd.Series(dtype=bool)
+    not_in_window = exposure["route_match_status"].eq("not_in_current_route_window") \
+        if not exposure.empty else pd.Series(dtype=bool)
+    traceable_count = int(matched.sum()) if len(matched) else 0
     summary = {
         "analysis_scope": scope, "source_type": source_type, "canonical_code": code,
-        "population_count": len(exposure), "matched_route_count": int(matched.sum()) if len(matched) else 0,
+        # matched_route_count is retained for old result readers.
+        "population_count": len(exposure), "matched_route_count": traceable_count,
+        "current_window_traceable_count": traceable_count,
+        "current_window_traceability_rate": traceable_count / len(exposure) if len(exposure) else 0.0,
+        "complete_route_count": int(complete.sum()) if len(complete) else 0,
+        "partial_route_count": int(partial.sum()) if len(partial) else 0,
+        "suspected_left_window_censored_count": int(suspected_left.sum()) if len(suspected_left) else 0,
+        "not_in_current_route_window_count": int(not_in_window.sum()) if len(not_in_window) else 0,
         "target_defect_count": int(exposure["is_target_defect"].sum()) if not exposure.empty else 0,
         "downtime_event_count": len(downtime),
         "top_hypothesis": hypotheses.iloc[0]["conclusion"] if not hypotheses.empty else "数据不足",
-        "warning": "Excel仅能推断疑似停机和统计关联，不能确认设备停机原因或物理根因。",
+        "warning": (
+            "Excel仅能推断疑似停机和统计关联，不能确认设备停机原因或物理根因。"
+            "仅对当前数据窗口内可按相同DMC追溯的产品计算事件暴露；"
+            "窗口外产品不等于DMC匹配失败。"
+        ),
     }
     return DefectCauseAnalysisResult(downtime, exposure, hypotheses, evidence, findings, summary)

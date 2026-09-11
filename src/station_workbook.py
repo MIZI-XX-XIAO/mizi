@@ -357,6 +357,9 @@ def enrich_products_with_station_truth(
 def process_parameter_frame(workbook: StationWorkbookData) -> pd.DataFrame:
     """Return one DMC row with the latest numeric WP1-WP5 parameters."""
     parameters = workbook.parameters.copy()
+    required = {"station_id", "numeric_value", "dmc_raw", "parameter_name", "test_date"}
+    if parameters.empty or not required.issubset(parameters.columns):
+        return pd.DataFrame(columns=["dmc_raw"])
     parameters = parameters[
         parameters["station_id"].astype(str).str.contains(r"_wp[1-5]$", regex=True)
         & parameters["numeric_value"].notna()

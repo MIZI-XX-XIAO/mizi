@@ -5,15 +5,14 @@
 
 ## 软件界面
 
-界面采用七个工作模块：
+界面采用六个工作模块：
 
 1. 新建任务：选择工站、Excel工作簿、图片根目录、结果目录，并在数据检查后按AOI/VI来源、缺陷代码、分析模块和工艺参数限定本次分析目标。
 2. 数据检查：校验Excel的Location(s)，并检查DMC匹配、多视图覆盖、重复图和缺图。
 3. 执行分析：后台提取缺陷并显示进度、资源使用、预计时间和实时告警。
 4. 结果概览：分别查看代码规律、图片空间规律或二者联合规律，支持AOI/VI来源、单个或多个缺陷代码筛选。
-5. Excel分析：读取测试工作簿，统计State、Tolerance超差、判定冲突、趋势和分组质量。
-6. 缺陷原因分析：从目标缺陷出发，识别Excel中的疑似停机、复产和工站区间暴露，按综合证据展示候选原因；数值参数的线性、非线性、阈值和双参数交互作为辅助证据。
-7. 图片复核：查看 A图、E图、差异图和Mask，支持检测框、同步缩放拖动、缺陷导航及局部原图。
+5. 缺陷原因分析：一次查看一个目标缺陷，识别Excel中的疑似停机、复产和工站区间暴露，按综合证据展示候选原因；数值参数的线性、非线性、阈值和双参数交互作为辅助证据。当前任务没有工艺参数时，才显示外部参数补充入口。
+6. 图片复核：查看 A图、E图、差异图和Mask，支持检测框、同步缩放拖动、缺陷导航及局部原图。
 
 窗口会适配常见办公电脑分辨率和 Windows DPI 缩放，并记忆窗口、路径、表格列宽及复核布局。
 
@@ -27,7 +26,7 @@
 
 工艺参数 CSV 应包含 `product_id`、`order_code`、`dmc_raw` 或 `global_order` 之一进行精确关联。没有共同产品键时，可使用 `production_timestamp` 或 `timestamp` 按界面容差就近匹配。其他数值列作为工艺参数参与分析。统计关联不代表因果关系。
 
-Excel质量分析支持`.xlsx`和`.xlsm`，并按工站分为WP、AOI、VI三种分析档。WP/AOI保留`Result.*`与`Tolerance`重算；AOI额外统计`AOIFailureCode`；VI在没有数值容差时统计Block code、Document Version、fail1、Failures area/code、Result.From和StationNo。
+新建任务支持`.xlsx`和`.xlsm`全工站MES工作簿，并按WP、AOI、VI工站识别产品履历、缺陷代码和工艺参数。普通单表Excel不作为独立任务入口；缺少工艺参数的图片任务可在缺陷原因页补充外部CSV或Excel。
 
 缺陷证据采用三层独立建模：AOI的`Result.AOIFailureCode`取首个数字段前4位；VI只读取`MS0335all`，`NOK`使用`Failure code`/`Failures code`作为缺陷代码，`OTHERS`使用`BlockCode`作为封存代码（个别导出把5050写入Failures code时仍以OTHERS状态判定为封存）。VI复合代码按分隔后的每个数字段分别取末4位，例如`189997_189998_`解析为`9997;9998`。图片层独立分析固定点、周期、连续异常和水平轨迹。VI人工代码不会覆盖AOI或图片结论。时序规律按同一工站的真实`production_order`计算；图片任务导航使用独立的`task_order`，缺图或过站事件不明确的产品不计为“周期缺失”。
 
@@ -98,7 +97,7 @@ uv run --frozen python -X utf8 -m pytest tests\test_real_images_e2e.py -q
 - `process_model_importance.csv`
 - `process_nonlinear_importance.csv`、`process_nonlinear_effects.csv`
 - `process_risk_curves.csv`
-- `process_interactions.csv`、`process_model_validation.csv`
+- `process_interactions.csv`、`process_interaction_regions.csv`、`process_model_validation.csv`
 - `association_findings.csv`、`association_findings.json`
 - `process_joined.csv`（纯Excel目标任务）
 - `process_relationship_summary.json`

@@ -12,10 +12,13 @@ import pandas as pd
 
 FINDING_COLUMNS = [
     "finding_id", "finding_type", "analysis_scope", "target", "source_type",
-    "canonical_code", "subject", "related_subject", "statement", "evidence_score",
+    "canonical_code", "defect_name", "subject", "related_subject", "statement", "evidence_score",
     "evidence_level", "effect_strength", "sample_size", "positive_count", "negative_count",
     "risk_ratio", "lift", "validation_auc", "stability", "data_quality", "warning",
-    "detail_type", "detail_key",
+    "detail_type", "detail_key", "analysis_question", "discovery_method",
+    "interpretation", "limitations", "recommended_action",
+    "sample_filter_field", "sample_filter_operator", "sample_filter_value",
+    "sample_filter_min", "sample_filter_max", "is_effective",
 ]
 IMPORTANCE_COLUMNS = ["参数", "置换重要性", "重要性波动"]
 EFFECT_COLUMNS = [
@@ -23,6 +26,12 @@ EFFECT_COLUMNS = [
     "P值", "FDR_Q值", "稳定性", "部分依赖风险差",
 ]
 INTERACTION_COLUMNS = ["参数A", "参数B", "交互强度", "双参数AUC", "最佳单参数AUC", "AUC增益"]
+INTERACTION_REGION_COLUMNS = [
+    "参数A", "参数B", "参数A区间", "参数B区间",
+    "参数A下界", "参数A上界", "参数B下界", "参数B上界",
+    "样本量", "缺陷数量", "缺陷率", "总体缺陷率", "风险比",
+    "保守风险差", "P值", "FDR_Q值", "是否高风险", "高风险排名",
+]
 VALIDATION_COLUMNS = [
     "验证方式", "有效折数", "非线性AUC", "AUC标准差", "线性基线AUC", "AUC增益",
     "样本量", "正样本", "负样本",
@@ -77,6 +86,113 @@ def _bh_adjust(values: list[float]) -> list[float]:
         running = min(running, values[original] * len(values) / (offset + 1))
         adjusted[original] = min(1.0, running)
     return adjusted.tolist()
+
+
+def _wilson_lower(positives: int, total: int, z: float = 1.96) -> float:
+    """Return a conservative lower confidence bound for a binomial rate."""
+    if total <= 0:
+        return 0.0
+    rate = positives / total
+    denominator = 1 + z * z / total
+    centre = rate + z * z / (2 * total)
+    margin = z * sqrt((rate * (1 - rate) + z * z / (4 * total)) / total)
+    return max(0.0, (centre - margin) / denominator)
+
+
+def _format_interval(interval: pd.Interval) -> str:
+    left_bracket = "[" if interval.closed_left else "("
+    right_bracket = "]" if interval.closed_right else ")"
+    return f"{left_bracket}{float(interval.left):.6g}, {float(interval.right):.6g}{right_bracket}"
+
+
+def _describe_interaction_regions(
+    x: pd.DataFrame,
+    y: pd.Series,
+    left: str,
+    right: str,
+    fisher_exact,
+) -> list[dict[str, Any]]:
+    """Describe the observable two-dimensional risk cells for one parameter pair."""
+    valid = x[left].notna() & x[right].notna()
+    if int(valid.sum()) < 20:
+        return []
+    try:
+        left_bins = pd.qcut(x.loc[valid, left], q=4, duplicates="drop", precision=6)
+        right_bins = pd.qcut(x.loc[valid, right], q=4, duplicates="drop", precision=6)
+    except ValueError:
+        return []
+    if left_bins.cat.categories.size < 2 or right_bins.cat.categories.size < 2:
+        return []
+
+    base_rate = float(y.loc[valid].mean())
+    minimum = max(5, int(np.ceil(valid.sum() * 0.02)))
+    cells = pd.DataFrame({
+        "_left": left_bins,
+        "_right": right_bins,
+        "_target": y.loc[valid].astype(int),
+    })
+    rows: list[dict[str, Any]] = []
+    p_values: list[float] = []
+    total_positives = int(cells["_target"].sum())
+    total = len(cells)
+    for (left_interval, right_interval), group in cells.groupby(
+        ["_left", "_right"], observed=True
+    ):
+        sample_size = len(group)
+        defects = int(group["_target"].sum())
+        outside_total = total - sample_size
+        outside_defects = total_positives - defects
+        if outside_total > 0:
+            _, p_value = fisher_exact([
+                [defects, sample_size - defects],
+                [outside_defects, outside_total - outside_defects],
+            ])
+        else:
+            p_value = 1.0
+        defect_rate = defects / sample_size if sample_size else 0.0
+        risk_ratio = defect_rate / base_rate if base_rate else np.nan
+        conservative_difference = _wilson_lower(defects, sample_size) - base_rate
+        eligible = (
+            sample_size >= minimum
+            and defects >= 2
+            and defect_rate > base_rate
+            and conservative_difference > 0
+        )
+        rows.append({
+            "参数A": left, "参数B": right,
+            "参数A区间": _format_interval(left_interval),
+            "参数B区间": _format_interval(right_interval),
+            "参数A下界": float(left_interval.left), "参数A上界": float(left_interval.right),
+            "参数B下界": float(right_interval.left), "参数B上界": float(right_interval.right),
+            "样本量": sample_size, "缺陷数量": defects,
+            "缺陷率": round(defect_rate, 6), "总体缺陷率": round(base_rate, 6),
+            "风险比": round(float(risk_ratio), 6) if pd.notna(risk_ratio) else np.nan,
+            "保守风险差": round(conservative_difference, 6),
+            "P值": round(float(p_value), 6), "FDR_Q值": np.nan,
+            "是否高风险": bool(eligible), "高风险排名": np.nan,
+        })
+        p_values.append(float(p_value))
+    for row, q_value in zip(rows, _bh_adjust(p_values)):
+        row["FDR_Q值"] = round(q_value, 6)
+    eligible_indices = sorted(
+        (index for index, row in enumerate(rows) if row["是否高风险"]),
+        key=lambda index: (
+            rows[index]["保守风险差"], rows[index]["风险比"], rows[index]["样本量"]
+        ),
+        reverse=True,
+    )
+    for rank, index in enumerate(eligible_indices, 1):
+        rows[index]["高风险排名"] = rank
+    return rows
+
+
+def _region_summary(region: pd.Series) -> str:
+    return (
+        f"{region['参数A']}处于{region['参数A区间']}且{region['参数B']}处于"
+        f"{region['参数B区间']}时，{int(region['样本量'])}件中有"
+        f"{int(region['缺陷数量'])}件缺陷（{float(region['缺陷率']):.1%}），"
+        f"总体为{float(region['总体缺陷率']):.1%}，风险约{float(region['风险比']):.2f}倍"
+    )
 
 
 def _level(score: float, high_allowed: bool) -> str:
@@ -152,6 +268,7 @@ def analyze_nonlinear_relationships(
         "nonlinear_importance": pd.DataFrame(columns=IMPORTANCE_COLUMNS),
         "nonlinear_effects": pd.DataFrame(columns=EFFECT_COLUMNS),
         "interactions": pd.DataFrame(columns=INTERACTION_COLUMNS),
+        "interaction_regions": pd.DataFrame(columns=INTERACTION_REGION_COLUMNS),
         "risk_curves": pd.DataFrame(columns=CURVE_COLUMNS),
         "model_validation": _insufficient_validation(len(usable), positives, "样本不足，仅描述性结果"),
         "findings": empty_findings(),
@@ -246,6 +363,7 @@ def analyze_nonlinear_relationships(
     effects_frame = pd.DataFrame(effects, columns=EFFECT_COLUMNS)
 
     interactions: list[dict[str, Any]] = []
+    interaction_regions: list[dict[str, Any]] = []
     for left, right in combinations(candidates, 2):
         scores = _cross_validated_auc(x[[left, right]], y, splits, lambda: _model(9))
         if not scores:
@@ -259,11 +377,17 @@ def analyze_nonlinear_relationships(
                 "双参数AUC": round(pair_auc, 5), "最佳单参数AUC": round(best_single, 5),
                 "AUC增益": round(gain, 5),
             })
+            interaction_regions.extend(
+                _describe_interaction_regions(x, y, left, right, fisher_exact)
+            )
     interaction_frame = pd.DataFrame(interactions, columns=INTERACTION_COLUMNS)
     if not interaction_frame.empty:
         interaction_frame = interaction_frame.sort_values(
             ["交互强度", "双参数AUC"], ascending=False, ignore_index=True
         )
+    interaction_region_frame = pd.DataFrame(
+        interaction_regions, columns=INTERACTION_REGION_COLUMNS
+    )
 
     validation = pd.DataFrame([{
         "验证方式": validation_method, "有效折数": len(nonlinear_aucs),
@@ -316,11 +440,27 @@ def analyze_nonlinear_relationships(
                              0.20 * support + 0.15 * match_rate), 1)
         high_allowed = interaction["双参数AUC"] >= 0.60 and interaction["AUC增益"] >= 0.03
         level = _level(score, bool(high_allowed))
+        pair_regions = interaction_region_frame[
+            interaction_region_frame["参数A"].eq(interaction["参数A"])
+            & interaction_region_frame["参数B"].eq(interaction["参数B"])
+            & interaction_region_frame["是否高风险"].eq(True)
+        ].sort_values("高风险排名") if not interaction_region_frame.empty else pd.DataFrame()
+        shown_regions = pair_regions.head(3)
+        if shown_regions.empty:
+            region_text = "模型发现两参数联合后区分能力提高，但当前样本不足以定位可靠高风险区间"
+        else:
+            descriptions = [
+                _region_summary(region) for _, region in shown_regions.iterrows()
+            ]
+            remaining = max(0, len(pair_regions) - len(shown_regions))
+            region_text = "；".join(descriptions)
+            if remaining:
+                region_text += f"；另有{remaining}个高风险组合可在热力图中查看"
         findings.append({
             "finding_id": f"INTERACTION-{index + 1:04d}", "finding_type": "参数交互",
             "subject": interaction["参数A"], "related_subject": interaction["参数B"],
             "statement": (
-                f"{interaction['参数A']}与{interaction['参数B']}存在非线性交互，联合AUC "
+                f"目标缺陷：{region_text}。联合AUC "
                 f"{float(interaction['双参数AUC']):.2f}，比最佳单参数提升"
                 f"{float(interaction['AUC增益']):.2f}；证据分{score:.0f}/100（{level}）。"
             ),
@@ -335,13 +475,14 @@ def analyze_nonlinear_relationships(
     for name in FINDING_COLUMNS:
         if name not in finding_frame:
             finding_frame[name] = "" if name in {
-                "analysis_scope", "target", "source_type", "canonical_code"
+                "analysis_scope", "target", "source_type", "canonical_code", "defect_name"
             } else np.nan
     finding_frame = finding_frame[FINDING_COLUMNS]
     return {
         "nonlinear_importance": importance,
         "nonlinear_effects": effects_frame,
         "interactions": interaction_frame,
+        "interaction_regions": interaction_region_frame,
         "risk_curves": pd.DataFrame(curve_rows, columns=CURVE_COLUMNS),
         "model_validation": validation,
         "findings": finding_frame,
@@ -359,6 +500,31 @@ def enrich_findings(frame: pd.DataFrame, **metadata: str) -> pd.DataFrame:
     result = frame.copy()
     for name, value in metadata.items():
         result[name] = value
+    source_caption = {
+        "VI_BLOCK": "VI", "VI_FAILURE": "VI", "AOI_FAILURE": "AOI", "IMAGE": "图片",
+    }.get(str(metadata.get("source_type", "")), str(metadata.get("source_type", "")))
+    code = str(metadata.get("canonical_code", "")).strip()
+    raw_defect_name = metadata.get("defect_name", "")
+    defect_name = (
+        "" if raw_defect_name is None or pd.isna(raw_defect_name)
+        else str(raw_defect_name).strip()
+    )
+    if code or defect_name:
+        label = defect_name or "目标缺陷"
+        suffix = " ".join(part for part in (source_caption, code) if part)
+        target_caption = f"{label}（{suffix}）" if suffix else label
+        process_mask = result.get("detail_type", pd.Series(index=result.index, dtype=str)).isin(
+            ["nonlinear_effect", "interaction"]
+        )
+        for index in result.index[process_mask]:
+            raw_statement = result.at[index, "statement"]
+            statement = "" if raw_statement is None or pd.isna(raw_statement) else str(raw_statement)
+            prefix = f"目标缺陷：{target_caption}。"
+            if statement.startswith("目标缺陷："):
+                statement = prefix + statement.removeprefix("目标缺陷：")
+            elif not statement.startswith(prefix):
+                statement = prefix + statement
+            result.at[index, "statement"] = statement
     return result.reindex(columns=FINDING_COLUMNS)
 
 
@@ -548,7 +714,7 @@ def build_unified_findings(
         for name in FINDING_COLUMNS:
             if name not in other:
                 other[name] = "" if name in {
-                    "analysis_scope", "target", "source_type", "canonical_code"
+                    "analysis_scope", "target", "source_type", "canonical_code", "defect_name"
                 } else np.nan
         parts.append(other[FINDING_COLUMNS])
     return sort_findings(pd.concat(parts, ignore_index=True) if parts else empty_findings())

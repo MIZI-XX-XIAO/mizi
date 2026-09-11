@@ -457,6 +457,7 @@ def run_excel_target_task(
         nonlinear_effect_parts: list[pd.DataFrame] = []
         risk_curve_parts: list[pd.DataFrame] = []
         interaction_parts: list[pd.DataFrame] = []
+        interaction_region_parts: list[pd.DataFrame] = []
         validation_parts: list[pd.DataFrame] = []
         finding_parts: list[pd.DataFrame] = []
         downtime_parts: list[pd.DataFrame] = []
@@ -475,6 +476,15 @@ def run_excel_target_task(
                 source = str(target["source_type"])
                 code = str(target["canonical_code"])
                 target_name = code_target_key(source, code)
+                target_rows = defect_events[
+                    defect_events["analysis_scope"].astype(str).eq(scope)
+                    & defect_events["source_type"].astype(str).eq(source)
+                    & defect_events["canonical_code"].astype(str).eq(code)
+                ]
+                defect_names = target_rows.get(
+                    "defect_name", pd.Series(dtype=str)
+                ).dropna().astype(str).loc[lambda values: values.str.strip().ne("")]
+                defect_name = defect_names.iloc[0] if not defect_names.empty else ""
                 target_products, target_defects = _target_relationship_population(
                     all_codes, source, code, scope,
                 )
@@ -484,7 +494,7 @@ def run_excel_target_task(
                 )
                 metadata = {
                     "analysis_scope": scope, "source_type": source,
-                    "canonical_code": code, "target": target_name,
+                    "canonical_code": code, "defect_name": defect_name, "target": target_name,
                 }
                 for destination, frame in (
                     (metric_parts, result.parameter_metrics),
@@ -495,6 +505,7 @@ def run_excel_target_task(
                     (nonlinear_effect_parts, result.nonlinear_effects),
                     (risk_curve_parts, result.risk_curves),
                     (interaction_parts, result.interactions),
+                    (interaction_region_parts, result.interaction_regions),
                     (validation_parts, result.model_validation),
                 ):
                     enriched = frame.copy()
@@ -540,6 +551,7 @@ def run_excel_target_task(
             "process_nonlinear_effects.csv": pd.concat(nonlinear_effect_parts, ignore_index=True) if nonlinear_effect_parts else pd.DataFrame(),
             "process_risk_curves.csv": pd.concat(risk_curve_parts, ignore_index=True) if risk_curve_parts else pd.DataFrame(),
             "process_interactions.csv": pd.concat(interaction_parts, ignore_index=True) if interaction_parts else pd.DataFrame(),
+            "process_interaction_regions.csv": pd.concat(interaction_region_parts, ignore_index=True) if interaction_region_parts else pd.DataFrame(),
             "process_model_validation.csv": pd.concat(validation_parts, ignore_index=True) if validation_parts else pd.DataFrame(),
             "downtime_events.csv": (
                 pd.concat(downtime_parts, ignore_index=True).drop_duplicates(
@@ -622,6 +634,7 @@ def run_excel_target_task(
             "process_nonlinear_effects": frames_to_write["process_nonlinear_effects.csv"],
             "process_risk_curves": frames_to_write["process_risk_curves.csv"],
             "process_interactions": frames_to_write["process_interactions.csv"],
+            "process_interaction_regions": frames_to_write["process_interaction_regions.csv"],
             "process_validation": frames_to_write["process_model_validation.csv"],
             "downtime_events": frames_to_write["downtime_events.csv"],
             "product_event_exposure": frames_to_write["product_event_exposure.csv"],

@@ -14,7 +14,7 @@ def test_relationship_worker_runs_job_in_background(qtbot) -> None:
     defects = pd.DataFrame({"global_order": orders[orders % 2 == 0], "component_area": 1})
     worker = RelationshipWorker(
         [("5S", "图片算法检出", "IMAGE", "", products, defects)],
-        parameters, 60, (),
+        parameters, (),
     )
     thread = QThread()
     worker.moveToThread(thread)

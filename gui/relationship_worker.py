@@ -18,11 +18,10 @@ class RelationshipWorker(QObject):
     finished = Signal()
 
     def __init__(self, jobs: list[tuple], parameters: pd.DataFrame,
-                 tolerance_seconds: int, selected_parameters: tuple[str, ...]) -> None:
+                 selected_parameters: tuple[str, ...]) -> None:
         super().__init__()
         self.jobs = jobs
         self.parameters = parameters
-        self.tolerance_seconds = tolerance_seconds
         self.selected_parameters = selected_parameters
         self._cancelled = Event()
 
@@ -36,8 +35,9 @@ class RelationshipWorker(QObject):
                     return
                 self.progress.emit(index - 1, len(self.jobs), target)
                 result = analyze_process_relationships(
-                    products, defects, self.parameters, self.tolerance_seconds,
+                    products, defects, self.parameters,
                     selected_parameters=self.selected_parameters,
+                    require_exact_match=True,
                 )
                 results.append((scope, target, source, code, result))
             self.completed.emit(results)

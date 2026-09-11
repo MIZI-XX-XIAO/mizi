@@ -25,6 +25,7 @@ from src.analysis_service import (
 )
 from src.app_runtime import APP_VERSION, configure_logging, new_error_id, user_data_dir
 from src.data_quality import DataQualityReport, validate_products
+from src.defect_cause_analysis import select_product_exposure_details
 from src.defect_relationships import analyze_defect_relationships
 from src.result_views import ResultView, build_result_view, pattern_count
 from src.nonlinear_relationships import build_unified_findings, enrich_findings
@@ -36,15 +37,14 @@ from .relationship_worker import RelationshipWorker
 from .result_dialogs import ResultDetailsWidget
 from .parameter_dialog import ParameterDialog
 from .workbench import ElidedLabel, LayoutProfile, WorkbenchShell, WorkbenchStack
-from .excel_analysis_page import ExcelAnalysisPage
 from .image_download_dialog import ImageDownloadDialog
+from .interaction_detail import InteractionDetailWidget
 from .mes_download_panel import MesDownloadDialog
 from src.image_download import ImageDownloadResult
-from src.excel_analysis import ExcelAnalysisResult, excel_relationship_frame, load_excel_workbook
+from src.excel_analysis import excel_relationship_frame, load_excel_workbook
 from src.station_sources import (
     build_image_product_index,
     load_station_catalog,
-    validate_selected_station,
 )
 from src.station_workbook import (
     StationWorkbookData, enrich_products_with_station_truth, load_station_workbook,
@@ -72,7 +72,6 @@ class MainWindow(QMainWindow):
         self.relationship_thread: QThread | None = None
         self.relationship_worker: RelationshipWorker | None = None
         self.current_result: AnalysisResult | None = None
-        self.current_excel_result: ExcelAnalysisResult | None = None
         self._result_config: dict[str, Any] = {}
         self.loaded_products = pd.DataFrame()
         self.analysis_products = pd.DataFrame()
@@ -93,10 +92,9 @@ class MainWindow(QMainWindow):
         self._build_quality_tab()
         self._build_progress_tab()
         self._build_result_tab()
-        self._build_excel_tab()
         self._build_relationship_tab()
         self.review = ImageReviewWidget()
-        self.tabs.addTab(self.review, "⑦ 图片复核")
+        self.tabs.addTab(self.review, "⑥ 图片复核")
         self.workbench = WorkbenchShell(self.tabs, APP_VERSION)
         self.workbench.navigation.exit_requested.connect(self.close)
         self.setCentralWidget(self.workbench)
@@ -689,27 +687,25 @@ class MainWindow(QMainWindow):
             self._saved_path("paths/process", ""), True,
             "工艺参数 (*.csv *.xlsx *.xlsm);;CSV (*.csv);;Excel (*.xlsx *.xlsm)"
         )
-        self.process_edit.setPlaceholderText("包含产品标识/时间戳和数值工艺参数的CSV或Excel")
-        self.time_tolerance = QSpinBox()
-        self.time_tolerance.setRange(0, 86400)
-        self.time_tolerance.setValue(int(self.settings.value("process/tolerance_seconds", 60)))
-        self.time_tolerance.setSuffix(" 秒")
+        self.process_row = process_row
+        self.process_edit.setPlaceholderText(
+            "补充包含产品标识（DMC/product_id/order_code/global_order）和数值参数的CSV或Excel"
+        )
+        self.relationship_source_status = QLabel("请先在“新建任务”中完成一次缺陷分析。")
+        self.relationship_source_status.setWordWrap(True)
         self.relationship_analyze = QPushButton("分析缺陷原因")
         self.relationship_analyze.setObjectName("primaryButton")
+        self.relationship_analyze.setEnabled(False)
         self.relationship_analyze.clicked.connect(self._analyze_process_parameters)
         self.relationship_cancel = QPushButton("取消关联分析")
         self.relationship_cancel.setEnabled(False)
         self.relationship_cancel.clicked.connect(self._cancel_relationship_analysis)
-        self.use_current_excel = QCheckBox("使用当前Excel分析结果")
-        self.use_current_excel.setEnabled(False)
-        controls.addWidget(process_row, 0, 0, 1, 5)
-        controls.addWidget(self.use_current_excel, 1, 0)
-        controls.addWidget(QLabel("时间匹配容差"), 1, 1)
-        controls.addWidget(self.time_tolerance, 1, 2)
+        controls.addWidget(self.relationship_source_status, 0, 0, 1, 5)
+        controls.addWidget(process_row, 1, 0, 1, 5)
         controls.setColumnStretch(3, 1)
-        controls.addWidget(self.relationship_analyze, 1, 4)
-        controls.addWidget(self.relationship_cancel, 1, 5)
-        self.relationship_summary = QLabel("完成缺陷分析后，可加载工艺参数表进行关联分析。")
+        controls.addWidget(self.relationship_analyze, 2, 4)
+        controls.addWidget(self.relationship_cancel, 2, 5)
+        self.relationship_summary = QLabel("请选择一个缺陷目标查看分析结论。")
         self.relationship_summary.setWordWrap(True)
         self.association_findings = AssociationFindingsWidget()
         self.association_findings.detail_requested.connect(self._show_association_finding_detail)
@@ -721,6 +717,8 @@ class MainWindow(QMainWindow):
         self.relationship_nonlinear = DataFrameTableWidget("process_nonlinear_effects")
         self.relationship_curves = DataFrameTableWidget("process_risk_curves")
         self.relationship_interactions = DataFrameTableWidget("process_interactions")
+        self.relationship_interaction_regions = pd.DataFrame()
+        self.interaction_detail = InteractionDetailWidget()
         self.relationship_validation = DataFrameTableWidget("process_model_validation")
         self.relationship_samples = DataFrameTableWidget("process_joined")
         self.cause_hypotheses = DataFrameTableWidget("cause_hypotheses")
@@ -748,6 +746,7 @@ class MainWindow(QMainWindow):
         tables.addTab(self.relationship_nonlinear, "非线性阈值")
         tables.addTab(self.relationship_curves, "风险曲线")
         tables.addTab(self.relationship_interactions, "参数交互")
+        tables.addTab(self.interaction_detail, "交互解释")
         tables.addTab(self.relationship_validation, "模型验证")
         tables.addTab(self.relationship_samples, "关联样本")
         tables.addTab(self.code_space_widget, "代码—空间关联")
@@ -756,7 +755,7 @@ class MainWindow(QMainWindow):
         tables.addTab(self.attribution_widget, "工站归因证据")
         self.relationship_details = tables
         relationship_views = QTabWidget()
-        relationship_views.addTab(self.association_findings, "重点发现 Top 10")
+        relationship_views.addTab(self.association_findings, "分析发现")
         relationship_views.addTab(tables, "详细证据")
         self.relationship_views = relationship_views
         layout.addWidget(title)
@@ -764,23 +763,8 @@ class MainWindow(QMainWindow):
         layout.addLayout(controls)
         layout.addWidget(self.relationship_summary)
         layout.addWidget(relationship_views, 1)
-        self.tabs.addTab(page, "⑥ 缺陷原因与关联分析")
-
-    def _build_excel_tab(self) -> None:
-        self.excel_page = ExcelAnalysisPage(self.project_root)
-        self.excel_page.result_ready.connect(self._excel_result_ready)
-        self.excel_page.status_message.connect(lambda message: self.statusBar().showMessage(message, 8000))
-        self.tabs.addTab(self.excel_page, "⑤ Excel分析")
-
-    def _excel_result_ready(self, result: ExcelAnalysisResult) -> None:
-        self.current_excel_result = result
-        self.use_current_excel.setEnabled(True)
-        self.use_current_excel.setChecked(True)
-        self.relationship_summary.setText(
-            f"当前Excel结果已就绪：{result.summary['record_count']}条记录、"
-            f"{result.summary['parameter_count']}个参数。可直接执行图片缺陷关联分析。"
-        )
-        self._maybe_auto_relationship()
+        self.tabs.addTab(page, "⑤ 缺陷原因与关联分析")
+        self._update_relationship_source_controls()
 
     def _build_status_bar(self) -> None:
         status = QStatusBar()
@@ -1100,7 +1084,6 @@ class MainWindow(QMainWindow):
                 image_texts = {scope: self.scope_image_edits[scope].text().strip() for scope in scopes}
                 if not excel_text and not any(image_texts.values()):
                     raise ValueError("请至少选择Excel工作簿或图片根目录")
-                excel_data = None
                 self.station_workbook = None
                 station_warnings: list[str] = []
                 if excel_text:
@@ -1109,17 +1092,21 @@ class MainWindow(QMainWindow):
                         raise FileNotFoundError(f"Excel工作簿不存在：{excel_path}")
                     try:
                         station_book = load_station_workbook(excel_path, self.station_catalog)
-                    except (ValueError, KeyError):
-                        station_book = None
-                    if station_book is not None:
-                        self.station_workbook = station_book
-                        station_warnings.extend(station_book.warnings)
-                    else:
-                        station = self.station_catalog.station(self._scope_station_id(scopes[0]))
-                        excel_data = load_excel_workbook(excel_path)
-                        station_warnings.extend(
-                            validate_selected_station(station, excel_data.query_parameters, self.station_catalog)
+                    except (ValueError, KeyError) as exc:
+                        raise ValueError(
+                            "不支持该Excel格式，请导入包含各工站Ident No.、Test Date和工站字段的"
+                            "完整MES工站工作簿。"
+                        ) from exc
+                    recognized = station_book.events.get(
+                        "station_id", pd.Series(dtype=str)
+                    ).fillna("").astype(str).str.strip().ne("")
+                    if station_book.events.empty or not recognized.any():
+                        raise ValueError(
+                            "不支持该Excel格式，请导入包含各工站Ident No.、Test Date和工站字段的"
+                            "完整MES工站工作簿。"
                         )
+                    self.station_workbook = station_book
+                    station_warnings.extend(station_book.warnings)
                 product_parts: list[pd.DataFrame] = []
                 issue_parts: list[pd.DataFrame] = []
                 scanned_count = 0
@@ -1132,10 +1119,7 @@ class MainWindow(QMainWindow):
                     )
                     excel_dmcs = (
                         selected_events["dmc_raw"].dropna().astype(str).str.strip().tolist()
-                        if not selected_events.empty else (
-                            excel_data.data["dmc_raw"].dropna().astype(str).str.strip().tolist()
-                            if excel_data is not None and "dmc_raw" in excel_data.data else []
-                        )
+                        if not selected_events.empty else []
                     )
                     image_text = image_texts[scope]
                     if not image_text:
@@ -1169,9 +1153,6 @@ class MainWindow(QMainWindow):
                     self.analysis_products["task_order"] = self.analysis_products["global_order"]
                 report = DataQualityReport("全流程任务", len(self.loaded_products), len(self.loaded_products.columns))
                 report.warnings.extend(station_warnings)
-                if excel_data is not None:
-                    report.warnings.extend(excel_data.quality_report.warnings)
-                    report.warnings.extend(excel_data.quality_report.errors)
                 if self.station_workbook is not None:
                     report.metrics.update({
                         "全工站履历事件": len(self.station_workbook.events),
@@ -1193,7 +1174,7 @@ class MainWindow(QMainWindow):
                 if error_issues:
                     report.errors.append(f"发现 {error_issues} 个需人工解决的重复视图")
                 if any(image_texts.values()) and self.analysis_products.empty:
-                    report.warnings.append("未找到完整主图对；可继续Excel分析，不运行图片算法")
+                    report.warnings.append("未找到完整主图对；可继续缺陷代码分析，不运行图片算法")
             quality_frame = report.to_frame()
             if not self._station_issues.empty:
                 issue_frame = pd.DataFrame({
@@ -1213,6 +1194,7 @@ class MainWindow(QMainWindow):
             self.quality_summary.style().unpolish(self.quality_summary)
             self.quality_summary.style().polish(self.quality_summary)
             self._populate_analysis_target_filters(report.is_valid)
+            self._update_relationship_source_controls()
             self.tabs.setCurrentIndex(1)
             return report.is_valid
         except Exception as exc:
@@ -1243,9 +1225,7 @@ class MainWindow(QMainWindow):
             if not self.config_modified:
                 self.config_snapshot = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             self.current_result = None
-            self.current_excel_result = None
-            self.use_current_excel.setEnabled(False)
-            self.use_current_excel.setChecked(False)
+            self._update_relationship_source_controls()
             excel_path = Path(self.source_excel_edit.text().strip()) if self.source_excel_edit.text().strip() else None
             selection = self._current_analysis_selection()
             if not selection.scopes:
@@ -1284,17 +1264,6 @@ class MainWindow(QMainWindow):
                         "图片分析缺少有效主图对的工站：" + "、".join(missing_scopes)
                     )
             pure_excel = not image_modules
-            if (
-                excel_path is not None and self.station_workbook is None
-                and not pure_excel
-                and not (self.excel_page.thread and self.excel_page.thread.isRunning())
-            ):
-                station = self.station_catalog.station(str(self.station_combo.currentData()))
-                self.excel_page.excel_profile = station.excel_profile
-                self.excel_page.workbook_edit.setText(str(excel_path))
-                self.excel_page.output_edit.setText(str(output))
-                self.excel_page.task_name.setText(self.task_edit.text())
-                self.excel_page.start_analysis()
             legacy_path = Path(self.products_edit.text().strip()) if self.products_edit.text().strip() else None
             source_files = (excel_path,) if excel_path is not None else ()
             catalog_path = (
@@ -1471,6 +1440,7 @@ class MainWindow(QMainWindow):
         if not result.summary.get("image_analysis_executed", True):
             self._show_process_result_frames(result)
         self._refresh_unified_findings(result.frames.get("association_findings", pd.DataFrame()))
+        self._update_relationship_source_controls()
         self.tabs.setCurrentIndex(3)
         self._maybe_auto_relationship()
 
@@ -1486,26 +1456,22 @@ class MainWindow(QMainWindow):
         self.relationship_nonlinear.set_frame(result.frames.get("process_nonlinear_effects", pd.DataFrame()))
         self.relationship_curves.set_frame(result.frames.get("process_risk_curves", pd.DataFrame()))
         self.relationship_interactions.set_frame(result.frames.get("process_interactions", pd.DataFrame()))
+        self.relationship_interaction_regions = result.frames.get(
+            "process_interaction_regions", pd.DataFrame()
+        ).copy()
         self.relationship_validation.set_frame(result.frames.get("process_validation", pd.DataFrame()))
         self.relationship_samples.set_frame(result.frames.get("process_joined", pd.DataFrame()))
         cause_summaries = result.summary.get("cause_analysis_targets", [])
         summaries = result.summary.get("relationship_targets", [])
         if cause_summaries:
-            self.relationship_summary.setText("；".join(
-                f"{item['analysis_scope']} {item['canonical_code']}：{item['top_hypothesis']}"
-                f"（可关联{item['matched_route_count']}/{item['population_count']}，"
-                f"疑似停机{item['downtime_event_count']}次）"
-                for item in cause_summaries
-            ))
+            self.relationship_summary.setText(
+                f"已完成{len(cause_summaries)}个缺陷目标的原因初步分析；"
+                "请选择一个缺陷查看结论和全部证据。"
+            )
         elif summaries:
-            lines = [
-                f"{item['analysis_scope']} {item['target']}：匹配{item['matched_count']}/"
-                f"{item['product_count']}，正样本{item['defective_product_count']}，"
-                f"参数{item['parameter_count']}，验证{item['validation_method']}，"
-                f"AUC {item['validation_auc'] if item['validation_auc'] is not None else '-'}"
-                for item in summaries
-            ]
-            self.relationship_summary.setText("；".join(lines))
+            self.relationship_summary.setText(
+                f"已完成{len(summaries)}个缺陷目标的工艺参数关联；请逐个切换缺陷查看。"
+            )
         else:
             self.relationship_summary.setText("本任务未生成工艺参数关联结果。")
         joined = result.frames.get("process_joined", pd.DataFrame())
@@ -1527,7 +1493,13 @@ class MainWindow(QMainWindow):
             product_count=len(frames.get("products", pd.DataFrame())),
         )
         frames["association_findings"] = findings
-        self.association_findings.set_findings(findings)
+        selection = self.current_result.summary.get("analysis_selection", {})
+        preferred = next(iter(selection.get("defect_codes", []) or []), "")
+        self.association_findings.set_findings(
+            findings,
+            cause_summaries=self.current_result.summary.get("cause_analysis_targets", []),
+            preferred_target=str(preferred),
+        )
         output = self.current_result.output_dir
         findings.to_csv(output / "association_findings.csv", index=False, encoding="utf-8-sig")
         records = findings.astype(object).where(pd.notna(findings), None).to_dict("records")
@@ -1543,6 +1515,78 @@ class MainWindow(QMainWindow):
 
     def _show_association_finding_detail(self, finding: pd.Series) -> None:
         detail_type = str(finding.get("detail_type", ""))
+        if detail_type == "cause_evidence" and self.current_result is not None:
+            exposure = self.current_result.frames.get("product_event_exposure", pd.DataFrame())
+            details = select_product_exposure_details(exposure, finding)
+            if details.empty:
+                self.statusBar().showMessage("该发现没有可定位的产品明细。", 8000)
+                return
+            code = str(finding.get("canonical_code", "目标"))
+            columns = [
+                "comparison_group", "matches_finding", "dmc_raw", "is_target_defect",
+                "source_event_time", "target_time", "route_coverage_status",
+                "route_match_reason", "downtime_ids", "downtime_segments",
+                "longest_downtime_seconds", "nearest_restart_seconds",
+                "nearest_restart_rank", "restart_bucket", "material_or_batch_change",
+                "speed_anomaly", "tension_anomaly", "static_anomaly",
+            ]
+            display = details[[name for name in columns if name in details]].rename(columns={
+                "comparison_group": "比较分组", "matches_finding": "符合当前发现条件",
+                "dmc_raw": "DMC", "is_target_defect": f"是否{code}缺陷",
+                "source_event_time": "缺陷检出时间", "target_time": "事件归因截止时间",
+                "route_coverage_status": "当前窗口路径覆盖状态",
+                "route_match_reason": "追溯状态说明", "downtime_ids": "疑似停机编号",
+                "downtime_segments": "停机所在WP区间",
+                "longest_downtime_seconds": "最长停机秒数",
+                "nearest_restart_seconds": "距最近复产秒数",
+                "nearest_restart_rank": "复产后产品序号", "restart_bucket": "复产窗口",
+                "material_or_batch_change": "换料或换批", "speed_anomaly": "速度异常",
+                "tension_anomaly": "张力异常", "static_anomaly": "静电异常",
+            })
+            self.product_event_exposure.set_frame(display)
+            self.product_event_exposure.search.clear()
+            self.relationship_views.setCurrentIndex(1)
+            self.relationship_details.setCurrentWidget(self.product_event_exposure)
+            exposed = int(details["matches_finding"].sum())
+            self.statusBar().showMessage(
+                f"已显示{len(details)}件当前数据窗口可追溯产品："
+                f"暴露组{exposed}件，未满足条件组{len(details) - exposed}件。",
+                8000,
+            )
+            return
+        if detail_type == "cause_hypothesis" and self.current_result is not None:
+            hypotheses = self.current_result.frames.get("cause_hypotheses", pd.DataFrame())
+            evidence = self.current_result.frames.get("cause_evidence", pd.DataFrame())
+            key = str(finding.get("detail_key", ""))
+            selected = hypotheses[
+                hypotheses.get("hypothesis_id", pd.Series(dtype=str)).astype(str).eq(key)
+            ] if not hypotheses.empty else pd.DataFrame()
+            identifiers = set()
+            if not selected.empty:
+                identifiers = {
+                    value for value in str(selected.iloc[0].get("supporting_evidence_ids", "")).split(";")
+                    if value
+                }
+            if identifiers and "evidence_id" in evidence:
+                evidence = evidence[evidence["evidence_id"].astype(str).isin(identifiers)]
+            self.cause_evidence.set_frame(evidence)
+            self.cause_evidence.search.clear()
+            self.relationship_views.setCurrentIndex(1)
+            self.relationship_details.setCurrentWidget(self.cause_evidence)
+            return
+        if detail_type == "interaction":
+            self.interaction_detail.set_data(
+                finding,
+                self.relationship_interaction_regions,
+                self.relationship_samples.model.frame,
+            )
+            if finding.get("requested_action") == "samples":
+                self.interaction_detail.show_samples()
+            else:
+                self.interaction_detail.show_heatmap()
+            self.relationship_views.setCurrentIndex(1)
+            self.relationship_details.setCurrentWidget(self.interaction_detail)
+            return
         process_samples = finding.get("requested_action") == "samples" and detail_type in {
             "nonlinear_effect", "interaction"
         }
@@ -1575,27 +1619,10 @@ class MainWindow(QMainWindow):
                 self._jump_from_pattern(match.iloc[0])
 
     def _maybe_auto_relationship(self) -> None:
-        """统一工站任务的Excel和图片都完成后自动关联。"""
+        """统一工站图片任务完成后，直接使用本任务的工艺数据关联。"""
         if self._auto_relationship_pending and self.current_result is not None and self.station_workbook is not None:
             self._auto_relationship_pending = False
             self._analyze_process_parameters()
-            return
-        if (
-            not self._auto_relationship_pending
-            or self.current_result is None
-            or self.current_excel_result is None
-        ):
-            return
-        if int(self.current_excel_result.summary.get("parameter_count", 0)) == 0:
-            self._auto_relationship_pending = False
-            self.relationship_summary.setText(
-                "当前为无数值工艺参数的VI类工作簿；已完成分类失效统计，"
-                "不执行数值参数与图片缺陷的相关模型。"
-            )
-            return
-        self._auto_relationship_pending = False
-        self.use_current_excel.setChecked(True)
-        self._analyze_process_parameters()
 
     def _populate_filters(self, products: pd.DataFrame, defects: pd.DataFrame) -> None:
         widgets = (
@@ -1932,26 +1959,42 @@ class MainWindow(QMainWindow):
                 continue
         self.statusBar().showMessage("该结果没有可关联的任务图片，无法进入图片复核。", 8000)
 
+    def _update_relationship_source_controls(self) -> None:
+        """Show external parameter import only when the active task cannot supply it."""
+        if not hasattr(self, "process_row"):
+            return
+        has_result = self.current_result is not None
+        parameters = self._inspected_parameters
+        if self.station_workbook is not None and parameters.empty:
+            parameters = process_parameter_frame(self.station_workbook)
+        parameter_columns = [
+            column for column in parameters.columns
+            if column != "dmc_raw" and pd.api.types.is_numeric_dtype(parameters[column])
+        ] if not parameters.empty else []
+        has_task_parameters = self.station_workbook is not None and bool(parameter_columns)
+        needs_external = has_result and not has_task_parameters
+        self.process_row.setVisible(needs_external)
+        self.relationship_analyze.setEnabled(has_result and self.relationship_thread is None)
+        if not has_result:
+            message = "请先在“新建任务”中完成一次缺陷分析。"
+        elif has_task_parameters:
+            message = f"正在使用当前任务Excel中的工艺数据（{len(parameter_columns)}个数值参数）。"
+        else:
+            message = "当前任务没有工艺参数；如需参数关联，请补充外部CSV或Excel。"
+        self.relationship_source_status.setText(message)
+
     def _analyze_process_parameters(self) -> None:
         if self.current_result is None:
             QMessageBox.warning(self, "尚无缺陷结果", "请先完成一次缺陷分析。")
             return
         try:
+            parameters = pd.DataFrame()
             if self.station_workbook is not None:
                 parameters = process_parameter_frame(self.station_workbook)
-                if parameters.empty or len(parameters.columns) == 1:
-                    raise ValueError("全工站工作簿中没有可用于关联的WP1-WP5数值工艺参数")
-            elif self.use_current_excel.isChecked():
-                if self.current_excel_result is None:
-                    raise ValueError("当前没有可用的Excel分析结果")
-                parameters = excel_relationship_frame(
-                    self.current_excel_result.workbook_data,
-                    self.current_excel_result.frames["standardized"],
-                )
-            else:
+            if parameters.empty or len(parameters.columns) == 1:
                 path = Path(self.process_edit.text().strip())
                 if not path.is_file():
-                    raise FileNotFoundError(f"工艺参数文件不存在：{path}")
+                    raise FileNotFoundError("当前任务缺少工艺参数，请选择需要补充的CSV或Excel文件")
                 if path.suffix.lower() in {".xlsx", ".xlsm"}:
                     workbook_data = load_excel_workbook(path)
                     parameters = excel_relationship_frame(workbook_data)
@@ -2048,7 +2091,7 @@ class MainWindow(QMainWindow):
             return
         self.relationship_thread = QThread(self)
         self.relationship_worker = RelationshipWorker(
-            jobs, parameters, self.time_tolerance.value(), selected_parameters
+            jobs, parameters, selected_parameters
         )
         self.relationship_worker.moveToThread(self.relationship_thread)
         self.relationship_thread.started.connect(self.relationship_worker.run)
@@ -2077,7 +2120,6 @@ class MainWindow(QMainWindow):
             self.relationship_summary.setText("正在安全取消；当前目标分析完成后停止…")
 
     def _relationship_thread_finished(self) -> None:
-        self.relationship_analyze.setEnabled(True)
         self.relationship_cancel.setEnabled(False)
         if self.relationship_worker is not None:
             self.relationship_worker.deleteLater()
@@ -2085,6 +2127,7 @@ class MainWindow(QMainWindow):
             self.relationship_thread.deleteLater()
         self.relationship_worker = None
         self.relationship_thread = None
+        self._update_relationship_source_controls()
 
     @Slot(object)
     def _apply_relationship_results(self, relationship_results: list[tuple]) -> None:
@@ -2092,14 +2135,25 @@ class MainWindow(QMainWindow):
             return
         groups = {
             "metrics": [], "bins": [], "models": [], "nonlinear_importance": [], "nonlinear": [],
-            "curves": [], "interactions": [], "validation": [], "samples": [], "findings": [],
+            "curves": [], "interactions": [], "interaction_regions": [],
+            "validation": [], "samples": [], "findings": [],
         }
         summary_rows = []
         first_result = relationship_results[0][4]
         for scope, target, source, code, result in relationship_results:
+            defect_name = ""
+            normalized = self.current_result.frames.get("normalized_codes", pd.DataFrame())
+            if not normalized.empty and code:
+                matching_names = normalized[
+                    normalized.get("analysis_scope", pd.Series(index=normalized.index, dtype=str)).astype(str).eq(str(scope))
+                    & normalized.get("source_type", pd.Series(index=normalized.index, dtype=str)).astype(str).eq(str(source))
+                    & normalized.get("canonical_code", pd.Series(index=normalized.index, dtype=str)).astype(str).eq(str(code))
+                ].get("defect_name", pd.Series(dtype=str)).dropna().astype(str)
+                matching_names = matching_names[matching_names.str.strip().ne("")]
+                defect_name = matching_names.iloc[0] if not matching_names.empty else ""
             metadata = {
                 "analysis_scope": scope, "source_type": source,
-                "canonical_code": code, "target": target,
+                "canonical_code": code, "defect_name": defect_name, "target": target,
             }
             for key, frame in (
                 ("metrics", result.parameter_metrics), ("bins", result.binned_rates),
@@ -2107,7 +2161,9 @@ class MainWindow(QMainWindow):
                 ("nonlinear_importance", result.nonlinear_importance),
                 ("nonlinear", result.nonlinear_effects),
                 ("curves", result.risk_curves),
-                ("interactions", result.interactions), ("validation", result.model_validation),
+                ("interactions", result.interactions),
+                ("interaction_regions", result.interaction_regions),
+                ("validation", result.model_validation),
                 ("samples", result.joined),
             ):
                 enriched = frame.copy()
@@ -2130,14 +2186,12 @@ class MainWindow(QMainWindow):
         self.relationship_nonlinear.set_frame(combined["nonlinear"])
         self.relationship_curves.set_frame(combined["curves"])
         self.relationship_interactions.set_frame(combined["interactions"])
+        self.relationship_interaction_regions = combined["interaction_regions"].copy()
         self.relationship_validation.set_frame(combined["validation"])
         self.relationship_samples.set_frame(combined["samples"])
-        self.relationship_summary.setText("；".join(
-            f"{row['analysis_scope']} {row['target']}：匹配{row['matched_count']}/{row['product_count']}，"
-            f"正样本{row['defective_product_count']}，非线性AUC "
-            f"{row.get('nonlinear_auc') if row.get('nonlinear_auc') is not None else '-'}"
-            for row in summary_rows
-        ))
+        self.relationship_summary.setText(
+            f"已完成{len(summary_rows)}个缺陷目标的工艺参数关联；请逐个切换缺陷查看。"
+        )
         output = self.current_result.output_dir
         filenames = {
             "metrics": "process_parameter_metrics.csv",
@@ -2147,11 +2201,25 @@ class MainWindow(QMainWindow):
             "nonlinear": "process_nonlinear_effects.csv",
             "curves": "process_risk_curves.csv",
             "interactions": "process_interactions.csv",
+            "interaction_regions": "process_interaction_regions.csv",
             "validation": "process_model_validation.csv",
             "samples": "process_joined.csv",
         }
         for key, filename in filenames.items():
             combined[key].to_csv(output / filename, index=False, encoding="utf-8-sig")
+        self.current_result.frames.update({
+            "process_metrics": combined["metrics"],
+            "process_bins": combined["bins"],
+            "process_models": combined["models"],
+            "process_nonlinear_importance": combined["nonlinear_importance"],
+            "process_nonlinear_effects": combined["nonlinear"],
+            "process_risk_curves": combined["curves"],
+            "process_interactions": combined["interactions"],
+            "process_interaction_regions": combined["interaction_regions"],
+            "process_validation": combined["validation"],
+            "process_joined": combined["samples"],
+            "association_findings": combined["findings"],
+        })
         (output / "process_relationship_summary.json").write_text(
             json.dumps(summary_rows, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -2174,7 +2242,6 @@ class MainWindow(QMainWindow):
             ("paths/source_excel", self.source_excel_edit.text()),
             ("paths/output", self.output_edit.text()), ("paths/image_root", self.image_root_edit.text()),
             ("paths/process", self.process_edit.text()), ("task/name", self.task_edit.text()),
-            ("process/tolerance_seconds", self.time_tolerance.value()),
             ("review/layout", self.review.layout_combo.currentText()),
         ):
             self.settings.setValue(key, value)
@@ -2220,12 +2287,6 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(self, "MES下载运行中", "先安全取消MES下载再关闭？")
             if answer == QMessageBox.Yes:
                 self._mes_dialog.worker.cancel()
-            event.ignore()
-            return
-        if self.excel_page.thread and self.excel_page.thread.isRunning():
-            answer = QMessageBox.question(self, "Excel任务运行中", "先安全取消Excel分析再关闭？")
-            if answer == QMessageBox.Yes:
-                self.excel_page.cancel_analysis()
             event.ignore()
             return
         if self.thread and self.thread.isRunning():
